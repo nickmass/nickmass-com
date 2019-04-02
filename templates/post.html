@@ -1,0 +1,10 @@
+<article class="post" itemscope itemtype="http://schema.org/BlogPosting">
+    <h6 itemprop="name"><a href="/post/{{post.url_fragment|e}}">{{post.title|e}}</a></h6>
+    <small>
+        <span itemprop="author">{{post.author.as_ref().map(String::as_str).unwrap_or("Unknown")|e}}</span>
+        <span> on </span>
+        <span itemprop="datePublished">{{post.render_date()|e}}</span></small>
+    <div itemprop="articleBody">
+        {{post.render_content()|safe}}
+    </div>
+</article>
