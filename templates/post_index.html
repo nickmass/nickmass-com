@@ -1,21 +1,21 @@
 {% extends "index.html" %}
-{% block title %}NickMass.com{% endblock %}
+{%- block title %}NickMass.com{% endblock -%}
 
-{% block content %}
-    {% for post in page.posts %}
-        {% include "post.html" %}
-        {% if !loop.last %}
+{%- block content -%}
+    {%- for post in page.posts -%}
+        {%- include "post.html" -%}
+        {%- if !loop.last -%}
         <hr>
-        {% endif %}
-    {% endfor %}
+        {%- endif -%}
+    {%- endfor -%}
     <div>
-        {% if current_page == 2 %}
+        {%- if current_page == 2 -%}
         <a class="button u-pull-left" href="/">Prev</a>
-        {% else if current_page > 2 %}
+        {%- else if current_page > 2 -%}
         <a class="button u-pull-left" href="/page/{{current_page - 1}}">Prev</a>
-        {% endif %}
-        {% if page.has_more %}
+        {%- endif -%}
+        {%- if page.has_more -%}
         <a class="button u-pull-right" href="/page/{{current_page + 1}}">Next</a>
-        {% endif %}
+        {%- endif -%}
     </div>
-{% endblock %}
+{%- endblock -%}

@@ -9,6 +9,18 @@
         <title>{% block title %}NickMass.com{% endblock %}</title>
     </head>
     <body>
+        {%- match user -%}
+        {%- when Some with (user) -%}
+        <div id="user-bar" class="u-full-width">
+            <div class="u-pull-right">
+                <span class="user-greeting">Hello, {{user.name|e}}</span>
+                <a class="button button-primary" href="/post/create">Create Post</a>
+                <a class="button" href="/auth/logout">Logout</a>
+            </div>
+            <div class="u-cf"></div>
+        </div>
+        {%- when None -%}
+        {%- endmatch -%}
         <div id="header">
             <canvas id="header-canvas"></canvas>
             <h1><a href="/">NickMass.com</a></h1>

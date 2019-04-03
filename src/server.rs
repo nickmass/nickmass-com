@@ -47,59 +47,83 @@ pub fn run(config: Config) {
             .and(maybe_cookie("sid"))
             .and_then(
                 |session: session::Session, ip: std::net::SocketAddr, sid: Option<String>| {
-                    session.get_store(ip.ip(), sid).map_err(err_log)
+                    session
+                        .get_store(ip.ip(), sid)
+                        .map(|store| {
+                            warp::ext::set(store.clone());
+                            store
+                        })
+                        .map_err(err_log)
                 },
-            )
-            .map(|store: session::Store| {
-                warp::ext::set(store.clone());
-                store
-            }))
+            ))
         .unify();
 
-    let json_body = warp::body::content_length_limit(1024 * 1024 * 5).and(warp::body::json());
-
-    let auth = warp::any()
+    let maybe_auth = warp::any()
         .and(session_store.clone())
         .and(db.clone())
         .and_then(|ses: session::Store, conn| {
             let id = ses.get("socialUser");
-            let client = users::UserClient::new(conn);
             if let Some(social_id) = id {
-                future::Either::A(client.get_social_user(social_id))
+                let client = users::UserClient::new(conn);
+                future::Either::A(client.get_social_user(social_id).map(Some))
             } else {
-                future::Either::B(future::err(users::Error::NotFound))
+                future::Either::B(future::ok(None))
             }
             .map_err(users::Error::reject)
         });
 
+    let auth = maybe_auth.clone().and_then(|user| {
+        if let Some(user) = user {
+            future::ok(user)
+        } else {
+            future::err(users::Error::NotFound)
+        }
+        .map_err(users::Error::reject)
+    });
+
     let view_index = warp::path::end()
+        .and(maybe_auth.clone())
         .and(db.clone())
-        .and_then(|conn| view::index(None, conn, None).map_err(err_log))
-        .map(warp::reply::html);
+        .and_then(|user, conn| view::index(user, conn, None).map_err(err_log));
 
     let view_page = warp::path("page")
         .and(warp::path::param::<i64>())
         .and(warp::path::end())
+        .and(maybe_auth.clone())
         .and(db.clone())
-        .and_then(|page: i64, conn| view::index(None, conn, Some(page)).map_err(err_log))
-        .map(warp::reply::html);
+        .and_then(|page, user, conn| view::index(user, conn, Some(page)).map_err(err_log));
 
     let view_post_id = warp::path("post")
         .and(warp::path::param::<u64>())
         .and(warp::path::end())
+        .and(maybe_auth.clone())
         .and(db.clone())
-        .and_then(|post, conn| view::post_id(None, conn, post).map_err(err_log))
-        .map(warp::reply::html);
+        .and_then(|post, user, conn| view::post_id(user, conn, post).map_err(err_log));
 
     let view_post_frag = warp::path("post")
         .and(warp::path::param::<String>())
         .and(warp::path::end())
+        .and(maybe_auth.clone())
         .and(db.clone())
-        .and_then(|post, conn| view::post_frag(None, conn, post).map_err(err_log))
-        .map(warp::reply::html);
+        .and_then(|post, user, conn| view::post_frag(user, conn, post).map_err(err_log));
 
-    let views = view_index.or(view_page).or(view_post_id).or(view_post_frag);
+    let views = view_index
+        .or(view_page)
+        .unify()
+        .or(view_post_id)
+        .unify()
+        .or(view_post_frag)
+        .unify()
+        .map(warp::reply::html)
+        .map(|reply| {
+            warp::reply::with_header(
+                reply,
+                "link",
+                "</css/bundle.css>; rel=preload; as=style, </js/header.js>; rel=preload; as=script",
+            )
+        });
 
+    let json_body = warp::body::content_length_limit(1024 * 1024 * 5).and(warp::body::json());
     let api = warp::path("api");
     let posts = api.and(warp::path("posts"));
     let posts_index = posts.and(warp::path::end());
@@ -306,9 +330,11 @@ pub fn run(config: Config) {
 
     let fallback = warp::get2()
         .or(warp::post2())
+        .unify()
         .and(warp::any())
+        .and(maybe_auth.clone())
         .and(db.clone())
-        .and_then(|_, conn| view::not_found(None, conn).map_err(err_log))
+        .and_then(|user, conn| view::not_found(user, conn).map_err(err_log))
         .map(warp::reply::html)
         .map(|reply| warp::reply::with_status(reply, warp::http::StatusCode::NOT_FOUND));
 

@@ -1,4 +1,12 @@
 <article class="post" itemscope itemtype="http://schema.org/BlogPosting">
+    {%- match user -%}
+    {%- when Some with (user) -%}
+    <div class="u-pull-right">
+        <a class="button" style="margin-right: 16px" href="/post/{{post.id|e}}/edit">Edit</a>
+        <form style="display: inline;" method="post" action="/post/{{post.id|e}}/delete"><button>Delete</button></form>
+    </div>
+    {%- when None -%}
+    {%- endmatch -%}
     <h6 itemprop="name"><a href="/post/{{post.url_fragment|e}}">{{post.title|e}}</a></h6>
     <small>
         <span itemprop="author">{{post.author.as_ref().map(String::as_str).unwrap_or("Unknown")|e}}</span>

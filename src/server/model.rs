@@ -1,18 +1,21 @@
 use askama::Template;
 
 use super::posts::{Post, PostPage};
+use super::users::User;
 
 #[derive(Template)]
 #[template(path = "post_index.html")]
 pub struct PostIndex {
     pub page: PostPage,
     pub current_page: i64,
+    pub user: Option<User>,
 }
 
 #[derive(Template)]
 #[template(path = "post_view.html")]
 pub struct PostView {
     pub post: Post,
+    pub user: Option<User>,
 }
 
 impl Post {
@@ -37,4 +40,6 @@ impl Post {
 
 #[derive(Template)]
 #[template(path = "not_found.html")]
-pub struct NotFound;
+pub struct NotFound {
+    pub user: Option<User>,
+}
