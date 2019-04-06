@@ -2,7 +2,7 @@ use askama::Template;
 use futures::{future, Future};
 
 use super::db::Connection;
-use super::model::*;
+use super::models::*;
 use super::posts::{Error, PostClient};
 use super::users::User;
 
