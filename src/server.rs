@@ -335,7 +335,7 @@ pub fn run(config: Config) {
     let socket_addr: std::net::SocketAddr =
         (server_config.listen_ip, server_config.listen_port).into();
 
-    info!("server starting on {}", socket_addr);
+    info!("Server starting on {}", socket_addr);
     warp::serve(
         api.or(views
             .or(logout)
