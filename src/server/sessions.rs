@@ -3,22 +3,11 @@ use redis::PipelineCommands;
 use ring::{aead, rand};
 
 use super::db::Connection;
+use super::error::Void;
 
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
-
-#[allow(dead_code)]
-#[derive(Debug)]
-pub enum Void {}
-
-impl std::fmt::Display for Void {
-    fn fmt(&self, _: &mut std::fmt::Formatter) -> std::fmt::Result {
-        unreachable!()
-    }
-}
-
-impl std::error::Error for Void {}
 
 pub struct Session {
     db: Connection,

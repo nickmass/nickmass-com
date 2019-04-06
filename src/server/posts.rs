@@ -4,7 +4,9 @@ use serde_derive::{Deserialize, Serialize};
 
 use super::auth::Authenticated;
 use super::db::Connection;
+use super::error::Resource;
 use super::users::{MaybeUser, User};
+use super::Error;
 
 use std::collections::HashMap;
 
@@ -82,46 +84,6 @@ pub struct PostPage {
     pub posts: Vec<Post>,
     pub has_more: bool,
     pub total: i64,
-}
-
-#[derive(Debug)]
-pub enum Error {
-    NotFound,
-    Redis(redis::RedisError),
-}
-
-impl Error {
-    pub fn reject(self) -> warp::Rejection {
-        log::error!("post error {:?}", self);
-        match self {
-            Error::NotFound => warp::reject::not_found(),
-            e => warp::reject::custom(e.to_string()),
-        }
-    }
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            Error::NotFound => write!(f, "Post Not Found"),
-            Error::Redis(e) => e.fmt(f),
-        }
-    }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::NotFound => None,
-            Error::Redis(e) => e.source(),
-        }
-    }
-}
-
-impl From<redis::RedisError> for Error {
-    fn from(other: redis::RedisError) -> Error {
-        Error::Redis(other)
-    }
 }
 
 pub struct PostClient {
@@ -205,7 +167,7 @@ impl PostClient {
             .arg(format!("post:{}", id))
             .query_async(db)
             .from_err::<Error>()
-            .and_then(|(conn, post): (_, MaybePost)| {
+            .and_then(move |(conn, post): (_, MaybePost)| {
                 if let Some(post) = Option::<Post>::from(post) {
                     future::Either::A(
                         redis::cmd("hget")
@@ -216,7 +178,7 @@ impl PostClient {
                             .join(future::ok(post)),
                     )
                 } else {
-                    future::Either::B(future::err(Error::NotFound))
+                    future::Either::B(future::err(Error::ResourceNotFound(Resource::Post(id))))
                 }
             })
             .map(|((_conn, author), mut post)| {
@@ -273,7 +235,7 @@ impl Authenticated<PostClient> {
             .from_err::<Error>()
             .and_then(move |(conn, exists): (_, bool)| {
                 if !exists {
-                    future::Either::A(future::err(Error::NotFound))
+                    future::Either::A(future::err(Error::ResourceNotFound(Resource::Post(id))))
                 } else {
                     let mut pipe = redis::pipe();
                     pipe.set(format!("postFragment:{}", post.url_fragment), id)

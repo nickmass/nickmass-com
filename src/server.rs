@@ -1,5 +1,6 @@
 use futures::{future, Future};
-use log::{error, info};
+use log::{error, info, warn};
+use warp::reject::custom as reject_with;
 use warp::{self, Filter};
 
 use std::sync::Arc;
@@ -7,6 +8,7 @@ use std::sync::Arc;
 mod auth;
 mod config;
 mod db;
+mod error;
 mod models;
 mod posts;
 mod sessions;
@@ -14,6 +16,7 @@ mod users;
 mod views;
 
 pub use config::Config;
+pub use error::Error;
 
 use sessions::{Session, Store};
 
@@ -27,7 +30,7 @@ pub fn run(config: Config) {
 
     let db = warp::any()
         .map(move || db.clone())
-        .and_then(|db: Db| db.get().map_err(err_log));
+        .and_then(|db: Db| db.get().map_err(reject_with));
 
     let config = warp::any().map(move || config.clone());
 
@@ -48,7 +51,7 @@ pub fn run(config: Config) {
             .and(session.clone())
             .and(warp::addr::remote().and_then(|addr| match addr {
                 Some(addr) => future::ok(addr),
-                None => future::err(warp::reject::custom("Ip required")),
+                None => future::err(reject_with(Error::IpRequired)),
             }))
             .and(maybe_cookie("sid"))
             .and_then(
@@ -59,7 +62,8 @@ pub fn run(config: Config) {
                             warp::ext::set(store.clone());
                             store
                         })
-                        .map_err(err_log)
+                        .from_err::<Error>()
+                        .map_err(reject_with)
                 },
             ))
         .unify();
@@ -75,43 +79,43 @@ pub fn run(config: Config) {
             } else {
                 future::Either::B(future::ok(None))
             }
-            .map_err(users::Error::reject)
+            .map_err(reject_with)
         });
 
     let auth = maybe_auth.clone().and_then(|user| {
         if let Some(user) = user {
             future::ok(user)
         } else {
-            future::err(users::Error::NotFound)
+            future::err(Error::Unauthorized)
         }
-        .map_err(users::Error::reject)
+        .map_err(reject_with)
     });
 
     let view_index = warp::path::end()
         .and(maybe_auth.clone())
         .and(db.clone())
-        .and_then(|user, conn| views::index(user, conn, None).map_err(err_log));
+        .and_then(|user, conn| views::index(user, conn, None).map_err(reject_with));
 
     let view_page = warp::path("page")
         .and(warp::path::param::<i64>())
         .and(warp::path::end())
         .and(maybe_auth.clone())
         .and(db.clone())
-        .and_then(|page, user, conn| views::index(user, conn, Some(page)).map_err(err_log));
+        .and_then(|page, user, conn| views::index(user, conn, Some(page)).map_err(reject_with));
 
     let view_post_id = warp::path("post")
         .and(warp::path::param::<u64>())
         .and(warp::path::end())
         .and(maybe_auth.clone())
         .and(db.clone())
-        .and_then(|post, user, conn| views::post_id(user, conn, post).map_err(err_log));
+        .and_then(|post, user, conn| views::post_id(user, conn, post).map_err(reject_with));
 
     let view_post_frag = warp::path("post")
         .and(warp::path::param::<String>())
         .and(warp::path::end())
         .and(maybe_auth.clone())
         .and(db.clone())
-        .and_then(|post, user, conn| views::post_frag(user, conn, post).map_err(err_log));
+        .and_then(|post, user, conn| views::post_frag(user, conn, post).map_err(reject_with));
 
     let views = view_index
         .or(view_page)
@@ -130,8 +134,8 @@ pub fn run(config: Config) {
         });
 
     let json_body = warp::body::content_length_limit(1024 * 1024 * 5).and(warp::body::json());
-    let api = warp::path("api");
-    let posts = api.and(warp::path("posts"));
+
+    let posts = warp::path("posts");
     let posts_index = posts.and(warp::path::end());
     let posts_id = posts.and(warp::path::param::<u64>()).and(warp::path::end());
     let posts_frag = posts
@@ -146,7 +150,7 @@ pub fn run(config: Config) {
             client
                 .get_all(100, 0)
                 .map(|posts| warp::reply::json(&posts))
-                .map_err(posts::Error::reject)
+                .map_err(reject_with)
         });
 
     let posts_get = warp::get2()
@@ -157,7 +161,7 @@ pub fn run(config: Config) {
             client
                 .get(id)
                 .map(|post| warp::reply::json(&post))
-                .map_err(posts::Error::reject)
+                .map_err(reject_with)
         });
 
     let posts_get_fragment =
@@ -169,7 +173,7 @@ pub fn run(config: Config) {
                 client
                     .get_by_fragment(fragment)
                     .map(|post| warp::reply::json(&post))
-                    .map_err(posts::Error::reject)
+                    .map_err(reject_with)
             });
 
     let posts_post = warp::post2()
@@ -183,7 +187,7 @@ pub fn run(config: Config) {
             client
                 .create(post)
                 .map(|id| warp::reply::json(&id))
-                .map_err(posts::Error::reject)
+                .map_err(reject_with)
         });
 
     let posts_put = warp::put2()
@@ -198,7 +202,7 @@ pub fn run(config: Config) {
             client
                 .update(id, post)
                 .map(|id| warp::reply::json(&id))
-                .map_err(posts::Error::reject)
+                .map_err(reject_with)
         });
 
     let posts_delete = warp::delete2()
@@ -212,7 +216,7 @@ pub fn run(config: Config) {
             client
                 .delete(id)
                 .map(|id| warp::reply::json(&id))
-                .map_err(posts::Error::reject)
+                .map_err(reject_with)
         });
 
     let posts_api = posts_get_all
@@ -222,12 +226,13 @@ pub fn run(config: Config) {
         .or(posts_put)
         .or(posts_delete);
 
-    let users_api = api
-        .and(warp::path("users"))
+    let users_api = warp::path("users")
         .and(warp::path("current"))
         .and(warp::path::end())
         .and(auth.clone())
         .map(|user: users::User| warp::reply::json(&user));
+
+    let api = warp::path("api").and(posts_api.or(users_api).recover(recover_json));
 
     let auth = warp::path("auth");
 
@@ -272,7 +277,8 @@ pub fn run(config: Config) {
                         eprintln!("b: {:?}", body);
                         serde_json::from_slice(&body).unwrap()
                     })*/
-                    .map_err(err_log)
+                    .from_err::<Error>()
+                    .map_err(reject_with)
                     .map(move |res: auth::OauthTokenResponse| {
                         store.set("socialUser", format!("google:{}", res.id_token.claims.sub));
                         warp::redirect(config.base_url.clone())
@@ -285,6 +291,7 @@ pub fn run(config: Config) {
             let sid = store.sid();
             session
                 .set_store(store)
+                .from_err::<Error>()
                 .map(move |_| {
                     warp::reply::with_header(
                         reply,
@@ -296,7 +303,7 @@ pub fn run(config: Config) {
                         ),
                     )
                 })
-                .map_err(err_log)
+                .map_err(reject_with)
         });
 
     let google_login = warp::get2()
@@ -325,33 +332,78 @@ pub fn run(config: Config) {
 
     let logger = warp::log("nickmass_com::api");
 
-    let fallback = warp::get2()
-        .or(warp::post2())
-        .unify()
-        .and(warp::any())
-        .and(maybe_auth.clone())
-        .and(db.clone())
-        .and_then(|user, conn| views::not_found(user, conn).map_err(err_log))
-        .map(warp::reply::html)
-        .map(|reply| warp::reply::with_status(reply, warp::http::StatusCode::NOT_FOUND));
-
     let socket_addr: std::net::SocketAddr =
         (server_config.listen_ip, server_config.listen_port).into();
+
     info!("server starting on {}", socket_addr);
     warp::serve(
-        views
-            .or(posts_api)
-            .or(users_api)
+        api.or(views
             .or(logout)
             .or(google_auth)
             .or(static_content)
-            .or(fallback)
+            .recover(recover_html))
             .with(logger),
     )
     .run(socket_addr);
 }
 
-fn err_log(error: impl std::error::Error + Send + Sync + 'static) -> warp::Rejection {
-    error!("{:?}", error);
-    warp::reject::custom(error)
+fn recover_json(err: warp::Rejection) -> Result<impl warp::Reply, warp::Rejection> {
+    if err.is_not_found() {
+        warn!("Not Found - {:?}", err);
+
+        let err = Error::NotFound.to_json();
+
+        let json = warp::reply::json(&err);
+
+        Ok(warp::reply::with_status(
+            json,
+            warp::http::StatusCode::from_u16(err.code)
+                .unwrap_or(warp::http::StatusCode::INTERNAL_SERVER_ERROR),
+        ))
+    } else if let Some(err) = err.find_cause::<Error>() {
+        error!("{} - {:?}", err, err);
+
+        let err = err.to_json();
+
+        let json = warp::reply::json(&err);
+
+        Ok(warp::reply::with_status(
+            json,
+            warp::http::StatusCode::from_u16(err.code)
+                .unwrap_or(warp::http::StatusCode::INTERNAL_SERVER_ERROR),
+        ))
+    } else {
+        error!("Unhandled Error - {:?}", err);
+        Err(err)
+    }
+}
+
+fn recover_html(err: warp::Rejection) -> Result<impl warp::Reply, warp::Rejection> {
+    if err.is_not_found() {
+        warn!("Not Found - {:?}", err);
+
+        let html = warp::reply::html(
+            views::not_found(None).unwrap_or(String::from("Internal Server Error")),
+        );
+
+        Ok(warp::reply::with_status(
+            html,
+            warp::http::StatusCode::NOT_FOUND,
+        ))
+    } else if let Some(err) = err.find_cause::<Error>() {
+        error!("{} - {:?}", err, err);
+
+        let html = warp::reply::html(
+            views::error(None, err).unwrap_or(String::from("Internal Server Error")),
+        );
+
+        Ok(warp::reply::with_status(
+            html,
+            warp::http::StatusCode::from_u16(err.status_code())
+                .unwrap_or(warp::http::StatusCode::INTERNAL_SERVER_ERROR),
+        ))
+    } else {
+        error!("Unhandled Error - {:?}", err);
+        Err(err)
+    }
 }

@@ -3,6 +3,8 @@ use redis::r#async::SharedConnection;
 use redis::{Client, IntoConnectionInfo};
 use std::sync::{Arc, RwLock};
 
+use super::Error;
+
 pub type Connection = SharedConnection;
 
 pub struct Db {
@@ -11,13 +13,13 @@ pub struct Db {
 }
 
 impl Db {
-    pub fn new(params: impl IntoConnectionInfo) -> Result<Db, redis::RedisError> {
+    pub fn new(params: impl IntoConnectionInfo) -> Result<Db, Error> {
         Ok(Db {
             client: Client::open(params)?,
             connection: Arc::new(RwLock::new(None)),
         })
     }
-    pub fn get(&self) -> impl Future<Item = Connection, Error = redis::RedisError> + Send {
+    pub fn get(&self) -> impl Future<Item = Connection, Error = Error> + Send {
         let conn = self.connection.read().unwrap();
 
         if let Some(conn) = conn.as_ref() {
@@ -27,12 +29,16 @@ impl Db {
             drop(conn);
             log::info!("creating redis connection");
             let conn = self.connection.clone();
-            let fut = self.client.get_shared_async_connection().map(move |c| {
-                log::info!("redis connection established");
-                let mut conn = conn.write().unwrap();
-                *conn = Some(c.clone());
-                c
-            });
+            let fut = self
+                .client
+                .get_shared_async_connection()
+                .from_err::<Error>()
+                .map(move |c| {
+                    log::info!("redis connection established");
+                    let mut conn = conn.write().unwrap();
+                    *conn = Some(c.clone());
+                    c
+                });
             future::Either::B(fut)
         }
     }

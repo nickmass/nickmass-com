@@ -2,46 +2,8 @@ use futures::{future, Future};
 use serde_derive::{Deserialize, Serialize};
 
 use super::db::Connection;
-
-#[derive(Debug)]
-pub enum Error {
-    NotFound,
-    Redis(redis::RedisError),
-}
-
-impl Error {
-    pub fn reject(self) -> warp::Rejection {
-        log::error!("user error {:?}", self);
-        match self {
-            Error::NotFound => warp::reject::forbidden(),
-            e => warp::reject::custom(e.to_string()),
-        }
-    }
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            Error::NotFound => write!(f, "User Not Found"),
-            Error::Redis(e) => e.fmt(f),
-        }
-    }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::NotFound => None,
-            Error::Redis(e) => e.source(),
-        }
-    }
-}
-
-impl From<redis::RedisError> for Error {
-    fn from(other: redis::RedisError) -> Error {
-        Error::Redis(other)
-    }
-}
+use super::error::Resource;
+use super::Error;
 
 #[derive(Serialize, Deserialize)]
 pub struct User {
@@ -109,11 +71,11 @@ impl UserClient {
             .arg(format!("user:{}", id))
             .query_async(conn)
             .from_err::<Error>()
-            .and_then(|(_conn, user): (_, MaybeUser)| {
+            .and_then(move |(_conn, user): (_, MaybeUser)| {
                 if let Some(user) = Option::<User>::from(user) {
                     future::ok(user)
                 } else {
-                    future::err(Error::NotFound)
+                    future::err(Error::ResourceNotFound(Resource::User(id)))
                 }
             })
     }
