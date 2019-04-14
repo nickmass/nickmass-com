@@ -133,6 +133,13 @@ impl AsGlUniform for f32 {
     }
 }
 
+impl AsGlUniform for [f32; 2] {
+    fn bind(&self, gl: &GL, program: &GlProgram, name: &'static str) {
+        let location = gl.get_uniform_location(&program.program, name);
+        gl.uniform2fv_with_f32_array(location.as_ref(), &self[..]);
+    }
+}
+
 impl AsGlUniform for [f32; 3] {
     fn bind(&self, gl: &GL, program: &GlProgram, name: &'static str) {
         let location = gl.get_uniform_location(&program.program, name);

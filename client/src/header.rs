@@ -167,6 +167,7 @@ impl Header {
         self.color_cycle.tick();
         self.circles.tick();
         self.mouse_circle.tick(mouse_pos);
+        self.logo.tick(mouse_pos);
 
         self.frame_buffer.bind();
         self.gl.enable(GL::BLEND);
@@ -451,6 +452,7 @@ struct Logo {
     logo_program: GlProgram,
     width: f32,
     height: f32,
+    mouse_pos: (f32, f32),
 }
 impl Logo {
     fn new(gl: &GL, width: f32, height: f32) -> Logo {
@@ -467,6 +469,7 @@ impl Logo {
             logo_program,
             width,
             height,
+            mouse_pos: (0.0, 0.0),
         }
     }
 
@@ -474,7 +477,33 @@ impl Logo {
         let ratio = self.height / self.width;
         let scale = if ratio > 0.15 { 0.75 } else { ratio * 5.0 };
         let offset = (ratio * ratio) * 0.8;
-        [scale, 0.0, 0.0, 0.0, scale, offset, 0.0, 0.0, 1.0]
+        [
+            scale,
+            0.0,
+            0.0,
+            0.0,
+            scale,
+            offset,
+            self.mouse_pos.0 / 2.0,
+            self.mouse_pos.1 / 2.0,
+            1.0,
+        ]
+    }
+
+    fn tick(&mut self, mouse_pos: Option<(f32, f32)>) {
+        if let Some(mouse) = mouse_pos {
+            let mouse = (
+                mouse.0 / self.width * 2.0 - 1.0,
+                mouse.1 / self.height * -2.0 + 1.0,
+            );
+            let diff_x = (mouse.0 - self.mouse_pos.0) / 5.0;
+            let diff_y = (mouse.1 - self.mouse_pos.1) / 5.0;
+            self.mouse_pos = (self.mouse_pos.0 + diff_x, self.mouse_pos.1 + diff_y);
+        } else {
+            let diff_x = (0.0 - self.mouse_pos.0) / 20.0;
+            let diff_y = (0.0 - self.mouse_pos.1) / 20.0;
+            self.mouse_pos = (self.mouse_pos.0 + diff_x, self.mouse_pos.1 + diff_y);
+        }
     }
 
     fn resize(&mut self, width: f32, height: f32) {
