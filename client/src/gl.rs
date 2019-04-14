@@ -212,6 +212,8 @@ pub struct GlTexture {
 impl GlTexture {
     pub fn new(gl: GL, width: u32, height: u32) -> GlTexture {
         let texture = gl.create_texture().expect("Create Texture");
+        let buf = vec![0; width as usize * height as usize * 4];
+
         gl.active_texture(GL::TEXTURE0);
         gl.bind_texture(GL::TEXTURE_2D, Some(&texture));
         gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
@@ -223,9 +225,9 @@ impl GlTexture {
             0,
             GL::RGBA,
             GL::UNSIGNED_BYTE,
-            None,
+            Some(&buf),
         )
-        .expect("Create Texture");
+        .expect("Assign Texture");
         gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_WRAP_S, GL::CLAMP_TO_EDGE as i32);
         gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_WRAP_T, GL::CLAMP_TO_EDGE as i32);
         gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_MIN_FILTER, GL::LINEAR as i32);
