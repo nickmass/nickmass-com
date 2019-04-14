@@ -10,11 +10,18 @@ mkdir ./public/js
 '''
 ]
 
+[tasks.install-wasm-pack]
+script_runner = "@shell"
+script = [
+'''
+wasm-pack -V || cargo install wasm-pack
+'''
+]
+
 [tasks.build-client]
-install_crate = "wasm-pack"
 command = "wasm-pack"
 args = ["build", "--out-dir", "../public/js", "--target", "web", "./client"]
-dependencies = ["clean-js"]
+dependencies = ["clean-js", "install-wasm-pack"]
 
 [tasks.build-server]
 command = "cargo"
