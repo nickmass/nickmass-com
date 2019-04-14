@@ -4,7 +4,7 @@ A simple blog
 
 ```console
 $ cargo install cargo-make
-$ cargo make --makefile ./makefile.toml
+$ cargo make
 $ cd dist
 $ ./nickmass-com config > config.toml
 $ ./nickmass-com
