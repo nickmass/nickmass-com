@@ -955,7 +955,6 @@ code,kbd,pre,samp {
 	position: absolute;
 	width: 100%;
 	height: 100%;
-	z-index: -1;
 }
 
 .post > h6 {

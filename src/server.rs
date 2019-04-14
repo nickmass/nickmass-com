@@ -129,7 +129,7 @@ pub fn run(config: Config) {
             warp::reply::with_header(
                 reply,
                 "link",
-                "</css/bundle.css>; rel=preload; as=style, </js/header.js>; rel=preload; as=script",
+                "</css/bundle.css>; rel=preload; as=style, </js/nickmass_com_client.js>; rel=preload; as=script, </js/nickmass_com_client_bg.wasm>; rel=preload; as=fetch",
             )
         });
 

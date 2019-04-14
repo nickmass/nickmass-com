@@ -22,9 +22,10 @@
         {%- when None -%}
         {%- endmatch -%}
         <div id="header">
-            <canvas id="header-canvas"></canvas>
-            <h1><a href="/">NickMass.com</a></h1>
-            <h4>Some short subtitle</h4>
+            <canvas id="header-canvas" style="height:300px;width:100%" height="512" width="2048">
+                <h1><a href="/">NickMass.com</a></h1>
+                <h4>Some short subtitle</h4>
+            </canvas>
             <div class="social-container">
                 <ul class="social-links">
                     <li><a href="http://twitter.com/nickmass"><i class="fa fa-twitter"></i><span> Twitter</span></a></li>
@@ -36,6 +37,12 @@
         <div class="container">
             {% block content %}{% endblock %}
         </div>
-        <script src="/js/header.js" defer></script>
+        <script type="module">
+         import { default as init } from '/js/nickmass_com_client.js';
+         async function run() {
+             await init('/js/nickmass_com_client_bg.wasm');
+         }
+         run();
+        </script>
     </body>
 </html>

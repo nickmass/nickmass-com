@@ -1,0 +1,43 @@
+[config]
+skip_core_tasks = true
+
+[tasks.clean-js]
+script_runner = "@shell"
+script = [
+'''
+rm -rf ./public/js
+mkdir ./public/js
+'''
+]
+
+[tasks.build-client]
+install_crate = "wasm-pack"
+command = "wasm-pack"
+args = ["build", "--out-dir", "../public/js", "--target", "web", "./client"]
+dependencies = ["clean-js"]
+
+[tasks.build-server]
+command = "cargo"
+args = ["build", "--release"]
+
+[tasks.css]
+script_runner = "@shell"
+script = [
+'''
+rm ./public/css/bundle.css
+cat ./public/css/normalize.css ./public/css/skeleton.css ./public/css/site.css > ./public/css/bundle.css
+'''
+]
+
+[tasks.default]
+script_runner = "@shell"
+script = [
+'''
+rm -rf ./dist
+mkdir ./dist
+cp ./target/release/nickmass-com ./dist
+cp -r ./public ./dist
+'''
+]
+dependencies = ["build-client", "build-server", "css"]
+
