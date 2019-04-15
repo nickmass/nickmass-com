@@ -321,10 +321,32 @@ impl Circle {
     }
 }
 
+struct CircleInstance {
+    matrix: [f32; 9],
+    color: [f32; 3],
+}
+
+impl AsGlVertex for CircleInstance {
+    const ATTRIBUTES: &'static [(&'static str, GlValueType)] = &[
+        ("a_model_matrix", GlValueType::Mat3),
+        ("a_color", GlValueType::Vec3),
+    ];
+    const POLY_TYPE: u32 = GL::TRIANGLE_FAN;
+    fn write(&self, mut buf: impl std::io::Write) {
+        for f in &self.matrix {
+            let _ = buf.write_f32::<LittleEndian>(*f);
+        }
+
+        for f in &self.color {
+            let _ = buf.write_f32::<LittleEndian>(*f);
+        }
+    }
+}
+
 struct CircleCollection {
     circles: Vec<Circle>,
-    circle_model: GlModel<CircleVertex>,
-    circle_program: GlProgram,
+    circle_model: GlInstancedModel<CircleVertex, CircleInstance>,
+    circle_program: GlInstancedProgram,
 }
 
 impl CircleCollection {
@@ -335,8 +357,8 @@ impl CircleCollection {
             circles.push(Circle::new());
         }
 
-        let circle_model = GlModel::new(gl.clone(), Circle::model());
-        let circle_program = GlProgram::new(gl.clone(), CIRCLE_VERT, CIRCLE_FRAG);
+        let circle_model = GlInstancedModel::new(gl.clone(), Circle::model());
+        let circle_program = GlInstancedProgram::new(gl.clone(), CIRCLE_VERT, CIRCLE_FRAG);
 
         CircleCollection {
             circles,
@@ -352,20 +374,18 @@ impl CircleCollection {
     }
 
     fn draw(&mut self, view_matrix: [f32; 9]) {
-        for circle in &self.circles {
-            let mut uniforms = GlUniformCollection::new();
+        let instance_verts = self.circles.iter().map(|c| CircleInstance {
+            matrix: c.matrix(),
+            color: c.color(),
+        });
+        let mut uniforms = GlUniformCollection::new();
 
-            let c_matrix = circle.matrix();
-            let c_color = circle.color();
+        uniforms
+            .add("u_view_matrix", &view_matrix)
+            .add("u_alpha", &1.0);
 
-            uniforms
-                .add("u_view_matrix", &view_matrix)
-                .add("u_model_matrix", &c_matrix)
-                .add("u_color", &c_color)
-                .add("u_alpha", &1.0);
-
-            self.circle_program.draw(&self.circle_model, &uniforms);
-        }
+        self.circle_program
+            .draw(&self.circle_model, instance_verts, &uniforms);
     }
 }
 struct MouseCircle {
@@ -375,15 +395,15 @@ struct MouseCircle {
     in_bounds: bool,
     width: f32,
     height: f32,
-    circle_model: GlModel<CircleVertex>,
-    circle_program: GlProgram,
+    circle_model: GlInstancedModel<CircleVertex, CircleInstance>,
+    circle_program: GlInstancedProgram,
     count: f32,
 }
 
 impl MouseCircle {
     fn new(gl: &GL, width: f32, height: f32) -> MouseCircle {
-        let circle_model = GlModel::new(gl.clone(), Circle::model());
-        let circle_program = GlProgram::new(gl.clone(), CIRCLE_VERT, CIRCLE_FRAG);
+        let circle_model = GlInstancedModel::new(gl.clone(), Circle::model());
+        let circle_program = GlInstancedProgram::new(gl.clone(), CIRCLE_VERT, CIRCLE_FRAG);
         MouseCircle {
             circle: Circle::new(),
             pos_x: 0.0,
@@ -431,17 +451,19 @@ impl MouseCircle {
 
         let mut uniforms = GlUniformCollection::new();
 
-        let c_matrix = self.circle.matrix();
-        let c_color: [f32; 3] = [1.0, 1.0, 1.0];
         let c_alpha = self.count.abs();
 
         uniforms
             .add("u_view_matrix", &view_matrix)
-            .add("u_model_matrix", &c_matrix)
-            .add("u_color", &c_color)
             .add("u_alpha", &c_alpha);
 
-        self.circle_program.draw(&self.circle_model, &uniforms);
+        let instance = CircleInstance {
+            matrix: self.circle.matrix(),
+            color: [1.0, 1.0, 1.0],
+        };
+
+        self.circle_program
+            .draw(&self.circle_model, std::iter::once(instance), &uniforms);
     }
 }
 
@@ -538,27 +560,15 @@ struct CircleVertex {
 }
 
 impl AsGlVertex for CircleVertex {
+    const ATTRIBUTES: &'static [(&'static str, GlValueType)] = &[
+        ("a_position", GlValueType::Vec2),
+        ("a_alpha", GlValueType::Float),
+    ];
+    const POLY_TYPE: u32 = GL::TRIANGLE_FAN;
     fn write(&self, mut buf: impl std::io::Write) {
         let _ = buf.write_f32::<LittleEndian>(self.x);
         let _ = buf.write_f32::<LittleEndian>(self.y);
         let _ = buf.write_f32::<LittleEndian>(self.alpha);
-    }
-
-    fn bind_attrs(gl: &GL) {
-        gl.vertex_attrib_pointer_with_i32(0, 2, GL::FLOAT, false, 12, 0);
-        gl.enable_vertex_attrib_array(0);
-
-        gl.vertex_attrib_pointer_with_i32(1, 1, GL::FLOAT, false, 12, 8);
-        gl.enable_vertex_attrib_array(1);
-    }
-
-    fn unbind_attrs(gl: &GL) {
-        gl.disable_vertex_attrib_array(0);
-        gl.disable_vertex_attrib_array(1);
-    }
-
-    fn poly_info(len: usize) -> (u32, i32) {
-        (GL::TRIANGLE_FAN, len as i32)
     }
 }
 
@@ -568,28 +578,16 @@ struct QuadVertex {
 }
 
 impl AsGlVertex for QuadVertex {
+    const ATTRIBUTES: &'static [(&'static str, GlValueType)] = &[
+        ("a_position", GlValueType::Vec2),
+        ("a_uv", GlValueType::Vec2),
+    ];
+    const POLY_TYPE: u32 = GL::TRIANGLE_STRIP;
     fn write(&self, mut buf: impl std::io::Write) {
         let _ = buf.write_f32::<LittleEndian>(self.position.0);
         let _ = buf.write_f32::<LittleEndian>(self.position.1);
         let _ = buf.write_f32::<LittleEndian>(self.uv.0);
         let _ = buf.write_f32::<LittleEndian>(self.uv.1);
-    }
-
-    fn bind_attrs(gl: &GL) {
-        gl.vertex_attrib_pointer_with_i32(0, 2, GL::FLOAT, false, 16, 0);
-        gl.enable_vertex_attrib_array(0);
-
-        gl.vertex_attrib_pointer_with_i32(1, 2, GL::FLOAT, false, 16, 8);
-        gl.enable_vertex_attrib_array(1);
-    }
-
-    fn unbind_attrs(gl: &GL) {
-        gl.disable_vertex_attrib_array(0);
-        gl.disable_vertex_attrib_array(1);
-    }
-
-    fn poly_info(len: usize) -> (u32, i32) {
-        (GL::TRIANGLE_STRIP, len as i32)
     }
 }
 
@@ -623,22 +621,11 @@ struct SimpleVertex {
 }
 
 impl AsGlVertex for SimpleVertex {
+    const ATTRIBUTES: &'static [(&'static str, GlValueType)] = &[("a_position", GlValueType::Vec2)];
+    const POLY_TYPE: u32 = GL::TRIANGLES;
     fn write(&self, mut buf: impl std::io::Write) {
         let _ = buf.write_f32::<LittleEndian>(self.position.0);
         let _ = buf.write_f32::<LittleEndian>(self.position.1);
-    }
-
-    fn bind_attrs(gl: &GL) {
-        gl.vertex_attrib_pointer_with_i32(0, 2, GL::FLOAT, false, 8, 0);
-        gl.enable_vertex_attrib_array(0);
-    }
-
-    fn unbind_attrs(gl: &GL) {
-        gl.disable_vertex_attrib_array(0);
-    }
-
-    fn poly_info(len: usize) -> (u32, i32) {
-        (GL::TRIANGLES, len as i32)
     }
 }
 
@@ -660,17 +647,20 @@ const CIRCLE_TRI_COUNT: usize = 32;
 const CIRCLE_VERT: &str = r#"
 precision highp float;
 
+attribute mat3 a_model_matrix;
 attribute vec2 a_position;
 attribute float a_alpha;
+attribute vec3 a_color;
 
 varying float v_alpha;
+varying vec3 v_color;
 
 uniform mat3 u_view_matrix;
-uniform mat3 u_model_matrix;
 
 void main() {
-  vec3 pos = vec3(a_position, 1.0) * u_model_matrix * u_view_matrix;
+  vec3 pos = vec3(a_position, 1.0) * a_model_matrix * u_view_matrix;
   v_alpha = a_alpha;
+  v_color = a_color;
   gl_Position = vec4(pos.xy / pos.z, 1.0, 1.0);
 }
 "#;
@@ -679,14 +669,12 @@ const CIRCLE_FRAG: &str = r#"
 precision highp float;
 
 varying float v_alpha;
+varying vec3 v_color;
 
-uniform vec3 u_color;
 uniform float u_alpha;
 
-//uniform sampler2D u_logo_sampler;
-
 void main() {
-  gl_FragColor = vec4(u_color * v_alpha * u_alpha, v_alpha * u_alpha);
+  gl_FragColor = vec4(v_color * v_alpha * u_alpha, v_alpha * u_alpha);
 }
 "#;
 

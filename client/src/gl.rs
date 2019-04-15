@@ -1,4 +1,6 @@
 use log::info;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 use web_sys::{
     WebGlBuffer, WebGlFramebuffer, WebGlProgram, WebGlRenderingContext as GL, WebGlShader,
     WebGlTexture,
@@ -71,7 +73,7 @@ impl GlProgram {
     {
         self.gl.use_program(Some(&self.program));
         uniforms.bind(&self.gl, &self);
-        model.draw();
+        model.draw(&self);
         self.reset_texture_unit();
     }
 
@@ -83,6 +85,36 @@ impl GlProgram {
 
     fn reset_texture_unit(&self) {
         self.texture_unit.set(0)
+    }
+}
+
+pub struct GlInstancedProgram {
+    gl: GL,
+    program: GlProgram,
+}
+
+impl GlInstancedProgram {
+    pub fn new(
+        gl: GL,
+        vertex_shader: impl AsRef<str>,
+        fragment_shader: impl AsRef<str>,
+    ) -> GlInstancedProgram {
+        let program = GlProgram::new(gl.clone(), vertex_shader, fragment_shader);
+        GlInstancedProgram { gl, program }
+    }
+
+    pub fn draw<V, I: AsGlVertex>(
+        &self,
+        model: &GlInstancedModel<V, I>,
+        instanced_data: impl IntoIterator<Item = I>,
+        uniforms: &GlUniformCollection,
+    ) where
+        V: AsGlVertex,
+    {
+        self.gl.use_program(Some(&self.program.program));
+        uniforms.bind(&self.gl, &self.program);
+        model.draw(&self.program, instanced_data);
+        self.program.reset_texture_unit();
     }
 }
 
@@ -176,7 +208,7 @@ impl<V: AsGlVertex> GlModel<V> {
 
         gl.buffer_data_with_u8_array(GL::ARRAY_BUFFER, data.as_slice(), GL::STATIC_DRAW);
 
-        let (poly_type, poly_count) = V::poly_info(count);
+        let (poly_type, poly_count) = (V::POLY_TYPE, count);
 
         GlModel {
             buffer,
@@ -187,11 +219,23 @@ impl<V: AsGlVertex> GlModel<V> {
         }
     }
 
-    fn draw(&self) {
+    fn draw(&self, program: &GlProgram) {
         self.gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.buffer));
-        V::bind_attrs(&self.gl);
+        let stride = V::ATTRIBUTES.iter().map(|a| a.1.size()).sum();
+        let mut offset = 0;
+        for (name, vtype) in V::ATTRIBUTES {
+            let location = self.gl.get_attrib_location(&program.program, name) as u32;
+            vtype.layout(&self.gl, location, stride, offset);
+            vtype.enable(&self.gl, location);
+            offset += vtype.size();
+        }
+
         self.gl.draw_arrays(self.poly_type, 0, self.poly_count);
-        V::unbind_attrs(&self.gl);
+
+        for (name, vtype) in V::ATTRIBUTES {
+            let location = self.gl.get_attrib_location(&program.program, name) as u32;
+            vtype.disable(&self.gl, location);
+        }
     }
 }
 
@@ -202,13 +246,250 @@ impl<V: AsGlVertex> Drop for GlModel<V> {
 }
 
 pub trait AsGlVertex {
+    const ATTRIBUTES: &'static [(&'static str, GlValueType)];
+    const POLY_TYPE: u32;
+
     fn write(&self, buf: impl std::io::Write);
+}
 
-    fn bind_attrs(gl: &GL);
+pub enum GlValueType {
+    Float,
+    Vec2,
+    Vec3,
+    Vec4,
+    Mat3,
+    Mat4,
+}
 
-    fn unbind_attrs(gl: &GL);
+impl GlValueType {
+    fn size(&self) -> i32 {
+        match self {
+            GlValueType::Float => 4,
+            GlValueType::Vec2 => 8,
+            GlValueType::Vec3 => 12,
+            GlValueType::Vec4 => 16,
+            GlValueType::Mat3 => 36,
+            GlValueType::Mat4 => 64,
+        }
+    }
 
-    fn poly_info(len: usize) -> (u32, i32);
+    fn elements(&self) -> u32 {
+        match self {
+            GlValueType::Mat3 => 3,
+            GlValueType::Mat4 => 4,
+            _ => 1,
+        }
+    }
+
+    fn enable(&self, gl: &GL, location: u32) {
+        match self {
+            GlValueType::Mat3 => {
+                gl.enable_vertex_attrib_array(location);
+                gl.enable_vertex_attrib_array(location + 1);
+                gl.enable_vertex_attrib_array(location + 2);
+            }
+            GlValueType::Mat4 => {
+                gl.enable_vertex_attrib_array(location);
+                gl.enable_vertex_attrib_array(location + 1);
+                gl.enable_vertex_attrib_array(location + 2);
+                gl.enable_vertex_attrib_array(location + 3);
+            }
+            _ => gl.enable_vertex_attrib_array(location),
+        }
+    }
+
+    fn disable(&self, gl: &GL, location: u32) {
+        match self {
+            GlValueType::Mat3 => {
+                gl.disable_vertex_attrib_array(location);
+                gl.disable_vertex_attrib_array(location + 1);
+                gl.disable_vertex_attrib_array(location + 2);
+            }
+            GlValueType::Mat4 => {
+                gl.disable_vertex_attrib_array(location);
+                gl.disable_vertex_attrib_array(location + 1);
+                gl.disable_vertex_attrib_array(location + 2);
+                gl.disable_vertex_attrib_array(location + 3);
+            }
+            _ => gl.disable_vertex_attrib_array(location),
+        }
+    }
+
+    fn layout(&self, gl: &GL, location: u32, stride: i32, offset: i32) {
+        match self {
+            GlValueType::Float => {
+                gl.vertex_attrib_pointer_with_i32(location, 1, GL::FLOAT, false, stride, offset);
+            }
+            GlValueType::Vec2 => {
+                gl.vertex_attrib_pointer_with_i32(location, 2, GL::FLOAT, false, stride, offset);
+            }
+            GlValueType::Vec3 => {
+                gl.vertex_attrib_pointer_with_i32(location, 3, GL::FLOAT, false, stride, offset);
+            }
+            GlValueType::Vec4 => {
+                gl.vertex_attrib_pointer_with_i32(location, 4, GL::FLOAT, false, stride, offset);
+            }
+            GlValueType::Mat3 => {
+                gl.vertex_attrib_pointer_with_i32(location, 3, GL::FLOAT, false, stride, offset);
+                gl.vertex_attrib_pointer_with_i32(
+                    location + 1,
+                    3,
+                    GL::FLOAT,
+                    false,
+                    stride,
+                    offset + 12,
+                );
+                gl.vertex_attrib_pointer_with_i32(
+                    location + 2,
+                    3,
+                    GL::FLOAT,
+                    false,
+                    stride,
+                    offset + 24,
+                );
+            }
+            GlValueType::Mat4 => {
+                gl.vertex_attrib_pointer_with_i32(location, 4, GL::FLOAT, false, stride, offset);
+                gl.vertex_attrib_pointer_with_i32(
+                    location + 1,
+                    4,
+                    GL::FLOAT,
+                    false,
+                    stride,
+                    offset + 16,
+                );
+                gl.vertex_attrib_pointer_with_i32(
+                    location + 2,
+                    4,
+                    GL::FLOAT,
+                    false,
+                    stride,
+                    offset + 32,
+                );
+                gl.vertex_attrib_pointer_with_i32(
+                    location + 3,
+                    4,
+                    GL::FLOAT,
+                    false,
+                    stride,
+                    offset + 48,
+                );
+            }
+        }
+    }
+}
+
+pub struct GlInstancedModel<V: AsGlVertex, I: AsGlVertex> {
+    buffer: WebGlBuffer,
+    gl: GL,
+    poly_type: u32,
+    poly_count: i32,
+    ext: AngleInstancedArrays,
+    _v_marker: std::marker::PhantomData<V>,
+    _i_marker: std::marker::PhantomData<I>,
+}
+impl<V: AsGlVertex, I: AsGlVertex> GlInstancedModel<V, I> {
+    pub fn new(gl: GL, vertexes: impl IntoIterator<Item = V>) -> GlInstancedModel<V, I> {
+        let buffer = gl.create_buffer().expect("Gl Buffer");
+        gl.bind_buffer(GL::ARRAY_BUFFER, Some(&buffer));
+        let mut data = Vec::new();
+
+        let mut count = 0;
+        for v in vertexes {
+            v.write(&mut data);
+            count += 1;
+        }
+
+        gl.buffer_data_with_u8_array(GL::ARRAY_BUFFER, data.as_slice(), GL::STATIC_DRAW);
+
+        let (poly_type, poly_count) = (V::POLY_TYPE, count);
+
+        let ext = gl
+            .get_extension("ANGLE_instanced_arrays")
+            .transpose()
+            .and_then(|r| r.ok())
+            .expect("Angle extension");
+        let ext = ext.unchecked_into::<AngleInstancedArrays>();
+
+        GlInstancedModel {
+            buffer,
+            gl,
+            poly_type,
+            poly_count,
+            ext,
+            _v_marker: Default::default(),
+            _i_marker: Default::default(),
+        }
+    }
+
+    fn draw(&self, program: &GlProgram, instance_vertexes: impl IntoIterator<Item = I>) {
+        self.gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.buffer));
+        let stride = V::ATTRIBUTES.iter().map(|a| a.1.size()).sum();
+        let mut offset = 0;
+        for (name, vtype) in V::ATTRIBUTES {
+            let location = self.gl.get_attrib_location(&program.program, name) as u32;
+            for i in 0..vtype.elements() {
+                self.ext.vertex_attrib_divisor_angle(location + i, 0);
+            }
+            vtype.layout(&self.gl, location, stride, offset);
+            vtype.enable(&self.gl, location);
+            offset += vtype.size();
+        }
+
+        let instance_buffer = self.gl.create_buffer().expect("Gl Instance Buffer");
+        self.gl
+            .bind_buffer(GL::ARRAY_BUFFER, Some(&instance_buffer));
+        let mut data = Vec::new();
+
+        let mut count = 0;
+        for v in instance_vertexes {
+            v.write(&mut data);
+            count += 1;
+        }
+
+        self.gl
+            .buffer_data_with_u8_array(GL::ARRAY_BUFFER, data.as_slice(), GL::STATIC_DRAW);
+
+        let stride = I::ATTRIBUTES.iter().map(|a| a.1.size()).sum();
+        let mut offset = 0;
+        for (name, vtype) in I::ATTRIBUTES {
+            let location = self.gl.get_attrib_location(&program.program, name) as u32;
+            for i in 0..vtype.elements() {
+                self.ext.vertex_attrib_divisor_angle(location + i, 1);
+            }
+            vtype.layout(&self.gl, location, stride, offset);
+            vtype.enable(&self.gl, location);
+            offset += vtype.size();
+        }
+
+        self.ext
+            .draw_arrays_instanced_angle(self.poly_type, 0, self.poly_count, count)
+            .expect("Instanced Draw");
+
+        for (name, vtype) in I::ATTRIBUTES {
+            let location = self.gl.get_attrib_location(&program.program, name) as u32;
+            for i in 0..vtype.elements() {
+                self.ext.vertex_attrib_divisor_angle(location + i, 0);
+            }
+            vtype.disable(&self.gl, location);
+        }
+
+        self.gl.delete_buffer(Some(&instance_buffer));
+
+        for (name, vtype) in V::ATTRIBUTES {
+            let location = self.gl.get_attrib_location(&program.program, name) as u32;
+            for i in 0..vtype.elements() {
+                self.ext.vertex_attrib_divisor_angle(location + i, 0);
+            }
+            vtype.disable(&self.gl, location);
+        }
+    }
+}
+
+impl<V: AsGlVertex, I: AsGlVertex> Drop for GlInstancedModel<V, I> {
+    fn drop(&mut self) {
+        self.gl.delete_buffer(Some(&self.buffer));
+    }
 }
 
 pub struct GlTexture {
@@ -311,4 +592,35 @@ impl Drop for GlFramebuffer {
     fn drop(&mut self) {
         self.gl.delete_framebuffer(Some(&self.frame_buffer));
     }
+}
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_name = ANGLEInstancedArrays)]
+    type AngleInstancedArrays;
+
+    #[wasm_bindgen(method, getter, js_name = VERTEX_ATTRIB_ARRAY_DIVISOR_ANGLE)]
+    fn vertex_attrib_array_divisor_angle(this: &AngleInstancedArrays) -> i32;
+
+    #[wasm_bindgen(method, catch, js_name = drawArraysInstancedANGLE)]
+    fn draw_arrays_instanced_angle(
+        this: &AngleInstancedArrays,
+        mode: u32,
+        first: i32,
+        count: i32,
+        primcount: i32,
+    ) -> Result<(), JsValue>;
+
+    #[wasm_bindgen(method, catch, js_name = drawElementsInstancedANGLE)]
+    fn draw_elements_instanced_angle(
+        this: &AngleInstancedArrays,
+        mode: u32,
+        count: i32,
+        type_: u32,
+        offset: i32,
+        primcount: i32,
+    ) -> Result<(), JsValue>;
+
+    #[wasm_bindgen(method, js_name = vertexAttribDivisorANGLE)]
+    fn vertex_attrib_divisor_angle(this: &AngleInstancedArrays, index: u32, divisor: u32);
 }
