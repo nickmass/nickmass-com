@@ -224,7 +224,11 @@ impl<V: AsGlVertex> GlModel<V> {
         let stride = V::ATTRIBUTES.iter().map(|a| a.1.size()).sum();
         let mut offset = 0;
         for (name, vtype) in V::ATTRIBUTES {
-            let location = self.gl.get_attrib_location(&program.program, name) as u32;
+            let location = self.gl.get_attrib_location(&program.program, name);
+            if location < 0 {
+                continue;
+            }
+            let location = location as u32;
             vtype.layout(&self.gl, location, stride, offset);
             vtype.enable(&self.gl, location);
             offset += vtype.size();
@@ -233,7 +237,11 @@ impl<V: AsGlVertex> GlModel<V> {
         self.gl.draw_arrays(self.poly_type, 0, self.poly_count);
 
         for (name, vtype) in V::ATTRIBUTES {
-            let location = self.gl.get_attrib_location(&program.program, name) as u32;
+            let location = self.gl.get_attrib_location(&program.program, name);
+            if location < 0 {
+                continue;
+            }
+            let location = location as u32;
             vtype.disable(&self.gl, location);
         }
     }
@@ -427,7 +435,11 @@ impl<V: AsGlVertex, I: AsGlVertex> GlInstancedModel<V, I> {
         let stride = V::ATTRIBUTES.iter().map(|a| a.1.size()).sum();
         let mut offset = 0;
         for (name, vtype) in V::ATTRIBUTES {
-            let location = self.gl.get_attrib_location(&program.program, name) as u32;
+            let location = self.gl.get_attrib_location(&program.program, name);
+            if location < 0 {
+                continue;
+            }
+            let location = location as u32;
             for i in 0..vtype.elements() {
                 self.ext.vertex_attrib_divisor_angle(location + i, 0);
             }
@@ -453,7 +465,11 @@ impl<V: AsGlVertex, I: AsGlVertex> GlInstancedModel<V, I> {
         let stride = I::ATTRIBUTES.iter().map(|a| a.1.size()).sum();
         let mut offset = 0;
         for (name, vtype) in I::ATTRIBUTES {
-            let location = self.gl.get_attrib_location(&program.program, name) as u32;
+            let location = self.gl.get_attrib_location(&program.program, name);
+            if location < 0 {
+                continue;
+            }
+            let location = location as u32;
             for i in 0..vtype.elements() {
                 self.ext.vertex_attrib_divisor_angle(location + i, 1);
             }
@@ -467,7 +483,11 @@ impl<V: AsGlVertex, I: AsGlVertex> GlInstancedModel<V, I> {
             .expect("Instanced Draw");
 
         for (name, vtype) in I::ATTRIBUTES {
-            let location = self.gl.get_attrib_location(&program.program, name) as u32;
+            let location = self.gl.get_attrib_location(&program.program, name);
+            if location < 0 {
+                continue;
+            }
+            let location = location as u32;
             for i in 0..vtype.elements() {
                 self.ext.vertex_attrib_divisor_angle(location + i, 0);
             }
@@ -477,7 +497,11 @@ impl<V: AsGlVertex, I: AsGlVertex> GlInstancedModel<V, I> {
         self.gl.delete_buffer(Some(&instance_buffer));
 
         for (name, vtype) in V::ATTRIBUTES {
-            let location = self.gl.get_attrib_location(&program.program, name) as u32;
+            let location = self.gl.get_attrib_location(&program.program, name);
+            if location < 0 {
+                continue;
+            }
+            let location = location as u32;
             for i in 0..vtype.elements() {
                 self.ext.vertex_attrib_divisor_angle(location + i, 0);
             }
