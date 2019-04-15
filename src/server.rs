@@ -240,11 +240,20 @@ pub fn run(config: Config) {
         .and(warp::path("logout"))
         .and(config.clone())
         .map(|config: Arc<Config>| {
-            let reply = warp::redirect(config.base_url.clone());
+            let reply = warp::reply::with_header(
+                warp::http::StatusCode::TEMPORARY_REDIRECT,
+                warp::http::header::LOCATION,
+                config.base_url.to_string(),
+            );
+            let reply = warp::reply::with_header(
+                reply,
+                warp::http::header::SET_COOKIE,
+                "sid=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/; SameSite=Strict; HttpOnly",
+            );
             warp::reply::with_header(
                 reply,
-                "set-cookie",
-                "sid=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/; SameSite=Strict; HttpOnly",
+                warp::http::header::CACHE_CONTROL,
+                "no-cache, no-store, must-revalidate",
             )
         });
 
@@ -260,29 +269,34 @@ pub fn run(config: Config) {
             |store: Store, oauth: auth::OauthResponse, config: Arc<Config>| {
                 let client = reqwest::r#async::Client::new();
                 let redirect_uri = format!("{}auth/google/return", config.base_url);
-                client
-                    .post(&config.oauth_token_url.to_string())
-                    .form(&auth::OauthTokenRequest {
-                        code: &oauth.code,
-                        client_id: &config.oauth_id,
-                        client_secret: &config.oauth_secret,
-                        redirect_uri: redirect_uri.as_str(),
-                        grant_type: "authorization_code",
-                    })
-                    .send()
-                    .and_then(|mut res| res.json::<auth::OauthTokenResponse>())
-                    /*
-                    .and_then(|res| res.into_body().concat2())
-                    .map(|body| {
-                        eprintln!("b: {:?}", body);
-                        serde_json::from_slice(&body).unwrap()
-                    })*/
-                    .from_err::<Error>()
-                    .map_err(reject_with)
-                    .map(move |res: auth::OauthTokenResponse| {
-                        store.set("socialUser", format!("google:{}", res.id_token.claims.sub));
-                        warp::redirect(config.base_url.clone())
-                    })
+                let nounce = store.get("socialNounce");
+
+                if Some(oauth.state) != nounce {
+                    future::Either::A(future::err(Error::Unauthorized))
+                } else {
+                    let fut = client
+                        .post(&config.oauth_token_url.to_string())
+                        .form(&auth::OauthTokenRequest {
+                            code: &oauth.code,
+                            client_id: &config.oauth_id,
+                            client_secret: &config.oauth_secret,
+                            redirect_uri: redirect_uri.as_str(),
+                            grant_type: "authorization_code",
+                        })
+                        .send()
+                        .and_then(|mut res| res.json::<auth::OauthTokenResponse>())
+                        .from_err::<Error>();
+                    future::Either::B(fut)
+                }
+                .map_err(reject_with)
+                .map(move |res: auth::OauthTokenResponse| {
+                    store.set("socialUser", format!("google:{}", res.id_token.claims.sub));
+                    warp::reply::with_header(
+                        warp::http::StatusCode::TEMPORARY_REDIRECT,
+                        warp::http::header::LOCATION,
+                        config.base_url.to_string(),
+                    )
+                })
             },
         )
         .and(session.clone())
@@ -295,7 +309,7 @@ pub fn run(config: Config) {
                 .map(move |_| {
                     warp::reply::with_header(
                         reply,
-                        "set-cookie",
+                        warp::http::header::SET_COOKIE,
                         format!(
                             "sid={}; Max-Age={}; Path=/; SameSite=Strict; HttpOnly",
                             sid,
@@ -303,14 +317,26 @@ pub fn run(config: Config) {
                         ),
                     )
                 })
+                .map(|reply| {
+                    warp::reply::with_header(
+                        reply,
+                        warp::http::header::CACHE_CONTROL,
+                        "no-cache, no-store, must-revalidate",
+                    )
+                })
                 .map_err(reject_with)
         });
 
     let google_login = warp::get2()
         .and(google.and(warp::path::end()))
+        .and(session.clone())
+        .and(session_store.clone())
         .and(config.clone())
-        .map(|config: Arc<Config>| {
+        .map(|session: Session, store: Store, config: Arc<Config>| {
             let redirect_uri = format!("{}auth/google/return", config.base_url);
+            let social_nounce = session.create_nounce();
+            store.set("socialNounce", social_nounce.as_str());
+            let nounce = session.create_nounce();
             let auth_url = url::Url::parse_with_params(
                 &*config.oauth_login_url.to_string(),
                 &[
@@ -318,12 +344,44 @@ pub fn run(config: Config) {
                     ("response_type", "code"),
                     ("scope", "openid email profile"),
                     ("redirect_uri", redirect_uri.as_str()),
-                    ("state", "abc"),
+                    ("state", social_nounce.as_str()),
+                    ("nounce", nounce.as_str()),
                 ],
             )
             .expect("Config allows valid google url");
-            let http_uri: warp::http::Uri = auth_url.to_string().parse().expect("Url is valid uri");
-            warp::redirect(http_uri)
+            let http_uri = auth_url.to_string();
+            warp::reply::with_header(
+                warp::http::StatusCode::TEMPORARY_REDIRECT,
+                warp::http::header::LOCATION,
+                http_uri,
+            )
+        })
+        .and(session.clone())
+        .and(session_store.clone())
+        .and_then(|reply, session: Session, store: Store| {
+            let sid = store.sid();
+            session
+                .set_store(store)
+                .from_err::<Error>()
+                .map(move |_| {
+                    warp::reply::with_header(
+                        reply,
+                        warp::http::header::SET_COOKIE,
+                        format!(
+                            "sid={}; Max-Age={}; Path=/; SameSite=Strict; HttpOnly",
+                            sid,
+                            60 * 60 * 24 * 30
+                        ),
+                    )
+                })
+                .map(|reply| {
+                    warp::reply::with_header(
+                        reply,
+                        warp::http::header::CACHE_CONTROL,
+                        "no-cache, no-store, must-revalidate",
+                    )
+                })
+                .map_err(reject_with)
         });
 
     let google_auth = google_login.or(google_oath_return);

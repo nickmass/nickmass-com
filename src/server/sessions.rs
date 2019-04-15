@@ -90,11 +90,20 @@ impl Session {
 
     fn create_key(&self) -> String {
         use ring::rand::SecureRandom;
-        let mut user_key = [0; 128];
+        let mut user_key = [0; 32];
         self.rand
             .fill(&mut user_key)
             .expect("Crypto error, could not fill session user key random");
         base64::encode(&user_key[..])
+    }
+
+    pub fn create_nounce(&self) -> String {
+        use ring::rand::SecureRandom;
+        let mut nonce_bytes = [0; 12];
+        self.rand
+            .fill(&mut nonce_bytes)
+            .expect("Crypto error, could not fill session nonce random");
+        base64::encode(&nonce_bytes[..])
     }
 
     fn create_sid(&self, user_key: impl AsRef<str>, addr: IpAddr) -> String {
