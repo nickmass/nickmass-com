@@ -1,27 +1,96 @@
-use log::info;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{
-    WebGlBuffer, WebGlFramebuffer, WebGlProgram, WebGlRenderingContext as GL, WebGlShader,
-    WebGlTexture,
+    HtmlCanvasElement, WebGlBuffer, WebGlFramebuffer, WebGlProgram, WebGlRenderingContext as GL,
+    WebGlRenderingContext, WebGlShader, WebGlTexture, WebGlUniformLocation,
 };
 
-use std::cell::Cell;
+use std::any::{Any, TypeId};
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
-pub struct GlProgram {
-    gl: GL,
+pub struct GlContext<C = HtmlCanvasElement> {
+    gl: WebGlRenderingContext,
+    canvas: C,
+    ext_map: RefCell<HashMap<TypeId, Option<Box<dyn Any>>>>,
+}
+
+impl GlContext {
+    pub fn new(canvas: HtmlCanvasElement) -> Self {
+        let gl = canvas
+            .get_context("webgl")
+            .unwrap_or(None)
+            .and_then(|e| e.dyn_into::<WebGlRenderingContext>().ok())
+            .unwrap();
+        GlContext::with_gl(canvas, gl)
+    }
+}
+
+impl<C> GlContext<C> {
+    pub fn with_gl(canvas: C, gl: WebGlRenderingContext) -> Self {
+        GlContext {
+            gl,
+            canvas,
+            ext_map: RefCell::new(HashMap::new()),
+        }
+    }
+
+    pub fn canvas(&self) -> &C {
+        &self.canvas
+    }
+
+    pub fn load_extension<E: GlExtension>(&self) -> Option<E> {
+        let key = TypeId::of::<E>();
+        let mut map = self.ext_map.borrow_mut();
+        let entry = map.entry(key).or_insert_with(|| {
+            self.gl
+                .get_extension(E::EXT_NAME)
+                .transpose()
+                .and_then(|r| r.ok())
+                .map(|e| Box::new(e.unchecked_into::<E>()) as Box<dyn Any>)
+        });
+
+        entry.as_ref().and_then(|e| e.downcast_ref::<E>()).cloned()
+    }
+}
+
+impl<C> std::ops::Deref for GlContext<C> {
+    type Target = WebGlRenderingContext;
+
+    fn deref(&self) -> &Self::Target {
+        &self.gl
+    }
+}
+
+pub trait GlExtension: Any + Clone + JsCast {
+    const EXT_NAME: &'static str;
+}
+
+impl GlExtension for OesVertexArrayObject {
+    const EXT_NAME: &'static str = "OES_vertex_array_object";
+}
+
+impl GlExtension for AngleInstancedArrays {
+    const EXT_NAME: &'static str = "ANGLE_instanced_arrays";
+}
+
+pub struct GlProgram<'ctx> {
+    gl: &'ctx GlContext,
     program: WebGlProgram,
     vertex_shader: WebGlShader,
     fragment_shader: WebGlShader,
     texture_unit: Cell<u32>,
+    vao_ext: OesVertexArrayObject,
+    vao_map: HashMap<(u64, TypeId, TypeId), WebGlVertexArrayObject>,
+    uniform_map: HashMap<&'static str, Option<WebGlUniformLocation>>,
 }
 
-impl GlProgram {
+impl<'ctx> GlProgram<'ctx> {
     pub fn new(
-        gl: GL,
+        gl: &'ctx GlContext,
         vertex_shader: impl AsRef<str>,
         fragment_shader: impl AsRef<str>,
-    ) -> GlProgram {
+    ) -> GlProgram<'ctx> {
         let shader_vert = gl
             .create_shader(GL::VERTEX_SHADER)
             .expect("Valid Vertex Shader");
@@ -30,7 +99,7 @@ impl GlProgram {
         let info = gl.get_shader_info_log(&shader_vert);
         if let Some(info) = info {
             if info.len() > 0 {
-                info!("Vertex Shader: {}", info);
+                log::warn!("Vertex Shader: {}\n{}", info, vertex_shader.as_ref());
             }
         }
 
@@ -42,7 +111,7 @@ impl GlProgram {
         let info = gl.get_shader_info_log(&shader_frag);
         if let Some(info) = info {
             if info.len() > 0 {
-                info!("Fragment Shader: {}", info);
+                log::warn!("Fragment Shader: {}\n{}", info, fragment_shader.as_ref());
             }
         }
 
@@ -54,9 +123,16 @@ impl GlProgram {
         let info = gl.get_program_info_log(&prog);
         if let Some(info) = info {
             if info.len() > 0 {
-                info!("Progam: {}", info);
+                log::warn!(
+                    "Program Shader: {} {} {}",
+                    info,
+                    vertex_shader.as_ref(),
+                    fragment_shader.as_ref()
+                );
             }
         }
+
+        let vao_ext = gl.load_extension().expect("Oes VAO extension");
 
         GlProgram {
             gl,
@@ -64,17 +140,92 @@ impl GlProgram {
             texture_unit: Cell::new(0),
             vertex_shader: shader_vert,
             fragment_shader: shader_frag,
+            vao_ext,
+            vao_map: HashMap::new(),
+            uniform_map: HashMap::new(),
         }
     }
 
-    pub fn draw<V>(&self, model: &GlModel<V>, uniforms: &GlUniformCollection)
+    pub fn draw<V>(&mut self, model: &GlModel<V>, uniforms: &GlUniformCollection)
     where
         V: AsGlVertex,
     {
         self.gl.use_program(Some(&self.program));
-        uniforms.bind(&self.gl, &self);
-        model.draw(&self);
+
+        let key = (model.id, TypeId::of::<V>(), TypeId::of::<()>());
+        if let Some(vao) = self.vao_map.get(&key) {
+            self.vao_ext
+                .bind_vertex_array_oes(Some(vao))
+                .expect("Bind vao");
+        } else {
+            let vao = self.vao_ext.create_vertex_array_oes().expect("Create vao");
+            self.vao_map.insert(key, vao);
+            let vao = self.vao_map.get(&key).unwrap();
+
+            self.vao_ext
+                .bind_vertex_array_oes(Some(vao))
+                .expect("Bind vao");
+            model.fill_vao(&self);
+        }
+
+        self.bind_uniforms(uniforms);
+        model.draw();
+
+        self.vao_ext
+            .bind_vertex_array_oes(None)
+            .expect("Unbind vao");
         self.reset_texture_unit();
+    }
+
+    pub fn draw_instanced<V, I>(
+        &mut self,
+        model: &GlModel<V>,
+        instanced_data: impl IntoIterator<Item = I, IntoIter = impl ExactSizeIterator<Item = I>>,
+        uniforms: &GlUniformCollection,
+    ) where
+        V: AsGlVertex,
+        I: AsGlVertex,
+    {
+        self.gl.use_program(Some(&self.program));
+
+        let key = (model.id, TypeId::of::<V>(), TypeId::of::<I>());
+        if let Some(vao) = self.vao_map.get(&key) {
+            self.vao_ext
+                .bind_vertex_array_oes(Some(vao))
+                .expect("Bind vao");
+        } else {
+            let vao = self.vao_ext.create_vertex_array_oes().expect("Create vao");
+            self.vao_map.insert(key, vao);
+            let vao = self.vao_map.get(&key).unwrap();
+
+            self.vao_ext
+                .bind_vertex_array_oes(Some(vao))
+                .expect("Bind vao");
+            model.fill_vao_instanced::<I>(&self);
+        }
+
+        self.bind_uniforms(uniforms);
+        model.draw_instanced(instanced_data);
+
+        self.vao_ext
+            .bind_vertex_array_oes(None)
+            .expect("Unbind vao");
+        self.reset_texture_unit();
+    }
+
+    fn bind_uniforms(&mut self, uniforms: &GlUniformCollection) {
+        for (k, v) in &uniforms.uniforms {
+            let location = if let Some(location) = self.uniform_map.get(k) {
+                location
+            } else {
+                let location = self.gl.get_uniform_location(&self.program, k);
+                self.uniform_map.insert(k, location);
+                self.uniform_map.get(k).unwrap()
+            };
+            if location.is_some() {
+                v.bind(&self.gl, &self, location.as_ref());
+            }
+        }
     }
 
     fn next_texture_unit(&self) -> u32 {
@@ -88,38 +239,12 @@ impl GlProgram {
     }
 }
 
-pub struct GlInstancedProgram {
-    gl: GL,
-    program: GlProgram,
-}
-
-impl GlInstancedProgram {
-    pub fn new(
-        gl: GL,
-        vertex_shader: impl AsRef<str>,
-        fragment_shader: impl AsRef<str>,
-    ) -> GlInstancedProgram {
-        let program = GlProgram::new(gl.clone(), vertex_shader, fragment_shader);
-        GlInstancedProgram { gl, program }
-    }
-
-    pub fn draw<V, I: AsGlVertex>(
-        &self,
-        model: &GlInstancedModel<V, I>,
-        instanced_data: impl IntoIterator<Item = I>,
-        uniforms: &GlUniformCollection,
-    ) where
-        V: AsGlVertex,
-    {
-        self.gl.use_program(Some(&self.program.program));
-        uniforms.bind(&self.gl, &self.program);
-        model.draw(&self.program, instanced_data);
-        self.program.reset_texture_unit();
-    }
-}
-
-impl Drop for GlProgram {
+impl<'ctx> Drop for GlProgram<'ctx> {
     fn drop(&mut self) {
+        for (_k, v) in self.vao_map.drain() {
+            let _ = self.vao_ext.delete_vertex_array_oes(v);
+        }
+
         self.gl.detach_shader(&self.program, &self.vertex_shader);
         self.gl.detach_shader(&self.program, &self.fragment_shader);
 
@@ -131,13 +256,13 @@ impl Drop for GlProgram {
 }
 
 pub struct GlUniformCollection<'a> {
-    uniforms: fxhash::FxHashMap<&'static str, &'a dyn AsGlUniform>,
+    uniforms: HashMap<&'static str, &'a dyn AsGlUniform>,
 }
 
 impl<'a> GlUniformCollection<'a> {
     pub fn new() -> GlUniformCollection<'a> {
         GlUniformCollection {
-            uniforms: Default::default(),
+            uniforms: HashMap::new(),
         }
     }
 
@@ -146,56 +271,65 @@ impl<'a> GlUniformCollection<'a> {
 
         self
     }
-
-    fn bind(&self, gl: &GL, program: &GlProgram) {
-        for (k, v) in &self.uniforms {
-            v.bind(gl, program, k);
-        }
-    }
 }
 
 pub trait AsGlUniform {
-    fn bind(&self, gl: &GL, program: &GlProgram, name: &'static str);
+    fn bind(&self, gl: &GL, program: &GlProgram, location: Option<&WebGlUniformLocation>);
 }
 
 impl AsGlUniform for f32 {
-    fn bind(&self, gl: &GL, program: &GlProgram, name: &'static str) {
-        let location = gl.get_uniform_location(&program.program, name);
-        gl.uniform1f(location.as_ref(), *self);
+    fn bind(&self, gl: &GL, _program: &GlProgram, location: Option<&WebGlUniformLocation>) {
+        gl.uniform1f(location, *self);
     }
 }
 
 impl AsGlUniform for [f32; 2] {
-    fn bind(&self, gl: &GL, program: &GlProgram, name: &'static str) {
-        let location = gl.get_uniform_location(&program.program, name);
-        gl.uniform2fv_with_f32_array(location.as_ref(), &self[..]);
+    fn bind(&self, gl: &GL, _program: &GlProgram, location: Option<&WebGlUniformLocation>) {
+        gl.uniform2fv_with_f32_array(location, &self[..]);
+    }
+}
+
+impl AsGlUniform for (f32, f32) {
+    fn bind(&self, gl: &GL, program: &GlProgram, location: Option<&WebGlUniformLocation>) {
+        [self.0, self.1].bind(gl, program, location);
     }
 }
 
 impl AsGlUniform for [f32; 3] {
-    fn bind(&self, gl: &GL, program: &GlProgram, name: &'static str) {
-        let location = gl.get_uniform_location(&program.program, name);
-        gl.uniform3fv_with_f32_array(location.as_ref(), &self[..]);
+    fn bind(&self, gl: &GL, _program: &GlProgram, location: Option<&WebGlUniformLocation>) {
+        gl.uniform3fv_with_f32_array(location, &self[..]);
     }
 }
 
 impl AsGlUniform for [f32; 9] {
-    fn bind(&self, gl: &GL, program: &GlProgram, name: &'static str) {
-        let location = gl.get_uniform_location(&program.program, name);
-        gl.uniform_matrix3fv_with_f32_array(location.as_ref(), false, &self[..]);
+    fn bind(&self, gl: &GL, _program: &GlProgram, location: Option<&WebGlUniformLocation>) {
+        gl.uniform_matrix3fv_with_f32_array(location, false, &self[..]);
     }
 }
 
-pub struct GlModel<V: AsGlVertex> {
+impl<'ctx> AsGlUniform for GlTexture<'ctx> {
+    fn bind(&self, gl: &GL, program: &GlProgram, location: Option<&WebGlUniformLocation>) {
+        let texture_unit = program.next_texture_unit();
+        gl.active_texture(GL::TEXTURE0 + texture_unit);
+        gl.bind_texture(GL::TEXTURE_2D, Some(&self.texture));
+
+        gl.uniform1i(location, texture_unit as i32);
+    }
+}
+
+pub struct GlModel<'ctx, V: AsGlVertex> {
+    gl: &'ctx GlContext,
+    id: u64,
     buffer: WebGlBuffer,
-    gl: GL,
+    instanced_buffer: WebGlBuffer,
     poly_type: u32,
     poly_count: i32,
+    instanced_ext: AngleInstancedArrays,
     _marker: std::marker::PhantomData<V>,
 }
 
-impl<V: AsGlVertex> GlModel<V> {
-    pub fn new(gl: GL, vertexes: impl IntoIterator<Item = V>) -> GlModel<V> {
+impl<'ctx, V: AsGlVertex> GlModel<'ctx, V> {
+    pub fn new(gl: &'ctx GlContext, vertexes: impl IntoIterator<Item = V>) -> GlModel<'ctx, V> {
         let buffer = gl.create_buffer().expect("Gl Buffer");
         gl.bind_buffer(GL::ARRAY_BUFFER, Some(&buffer));
         let mut data = Vec::new();
@@ -210,52 +344,94 @@ impl<V: AsGlVertex> GlModel<V> {
 
         let (poly_type, poly_count) = (V::POLY_TYPE, count);
 
+        let instanced_buffer = gl.create_buffer().expect("Gl Instance Buffer");
+
+        let instanced_ext = gl.load_extension().expect("Angle instaned arrays");
+
         GlModel {
-            buffer,
             gl,
+            id: rand::random(),
+            buffer,
             poly_type,
             poly_count,
+            instanced_buffer,
+            instanced_ext,
             _marker: Default::default(),
         }
     }
 
-    fn draw(&self, program: &GlProgram) {
+    fn fill_vao(&self, program: &GlProgram) {
         self.gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.buffer));
-        let stride = V::ATTRIBUTES.iter().map(|a| a.1.size()).sum();
+        self.enable_attrs::<V>(program, None);
+    }
+
+    fn fill_vao_instanced<I: AsGlVertex>(&self, program: &GlProgram) {
+        self.gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.buffer));
+        self.enable_attrs::<V>(program, Some(0));
+        self.gl
+            .bind_buffer(GL::ARRAY_BUFFER, Some(&self.instanced_buffer));
+        self.enable_attrs::<I>(program, Some(1));
+    }
+
+    fn enable_attrs<I: AsGlVertex>(&self, program: &GlProgram, divisor: Option<u32>) {
+        let stride = I::ATTRIBUTES.iter().map(|a| a.1.size()).sum();
         let mut offset = 0;
-        for (name, vtype) in V::ATTRIBUTES {
+        for (name, vtype) in I::ATTRIBUTES {
             let location = self.gl.get_attrib_location(&program.program, name);
             if location < 0 {
                 continue;
             }
             let location = location as u32;
+            if let Some(divisor) = divisor {
+                for i in 0..vtype.elements() {
+                    self.instanced_ext
+                        .vertex_attrib_divisor_angle(location + i, divisor);
+                }
+            }
             vtype.layout(&self.gl, location, stride, offset);
             vtype.enable(&self.gl, location);
             offset += vtype.size();
         }
+    }
 
+    fn draw(&self) {
         self.gl.draw_arrays(self.poly_type, 0, self.poly_count);
+    }
 
-        for (name, vtype) in V::ATTRIBUTES {
-            let location = self.gl.get_attrib_location(&program.program, name);
-            if location < 0 {
-                continue;
-            }
-            let location = location as u32;
-            vtype.disable(&self.gl, location);
+    fn draw_instanced<I: AsGlVertex>(
+        &self,
+        instance_vertexes: impl IntoIterator<Item = I, IntoIter = impl ExactSizeIterator<Item = I>>,
+    ) {
+        self.gl
+            .bind_buffer(GL::ARRAY_BUFFER, Some(&self.instanced_buffer));
+
+        let iter = instance_vertexes.into_iter();
+        let count = iter.len();
+        let mut data = Vec::with_capacity(count * I::SIZE);
+        for v in iter {
+            v.write(&mut data);
         }
+
+        self.gl
+            .buffer_data_with_u8_array(GL::ARRAY_BUFFER, data.as_slice(), GL::DYNAMIC_DRAW);
+
+        self.instanced_ext
+            .draw_arrays_instanced_angle(self.poly_type, 0, self.poly_count, count as i32)
+            .expect("Instanced Draw");
     }
 }
 
-impl<V: AsGlVertex> Drop for GlModel<V> {
+impl<'ctx, V: AsGlVertex> Drop for GlModel<'ctx, V> {
     fn drop(&mut self) {
         self.gl.delete_buffer(Some(&self.buffer));
+        self.gl.delete_buffer(Some(&self.instanced_buffer));
     }
 }
 
-pub trait AsGlVertex {
+pub trait AsGlVertex: Any {
     const ATTRIBUTES: &'static [(&'static str, GlValueType)];
     const POLY_TYPE: u32;
+    const SIZE: usize;
 
     fn write(&self, buf: impl std::io::Write);
 }
@@ -387,142 +563,13 @@ impl GlValueType {
     }
 }
 
-pub struct GlInstancedModel<V: AsGlVertex, I: AsGlVertex> {
-    buffer: WebGlBuffer,
-    gl: GL,
-    poly_type: u32,
-    poly_count: i32,
-    ext: AngleInstancedArrays,
-    _v_marker: std::marker::PhantomData<V>,
-    _i_marker: std::marker::PhantomData<I>,
-}
-impl<V: AsGlVertex, I: AsGlVertex> GlInstancedModel<V, I> {
-    pub fn new(gl: GL, vertexes: impl IntoIterator<Item = V>) -> GlInstancedModel<V, I> {
-        let buffer = gl.create_buffer().expect("Gl Buffer");
-        gl.bind_buffer(GL::ARRAY_BUFFER, Some(&buffer));
-        let mut data = Vec::new();
-
-        let mut count = 0;
-        for v in vertexes {
-            v.write(&mut data);
-            count += 1;
-        }
-
-        gl.buffer_data_with_u8_array(GL::ARRAY_BUFFER, data.as_slice(), GL::STATIC_DRAW);
-
-        let (poly_type, poly_count) = (V::POLY_TYPE, count);
-
-        let ext = gl
-            .get_extension("ANGLE_instanced_arrays")
-            .transpose()
-            .and_then(|r| r.ok())
-            .expect("Angle extension");
-        let ext = ext.unchecked_into::<AngleInstancedArrays>();
-
-        GlInstancedModel {
-            buffer,
-            gl,
-            poly_type,
-            poly_count,
-            ext,
-            _v_marker: Default::default(),
-            _i_marker: Default::default(),
-        }
-    }
-
-    fn draw(&self, program: &GlProgram, instance_vertexes: impl IntoIterator<Item = I>) {
-        self.gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.buffer));
-        let stride = V::ATTRIBUTES.iter().map(|a| a.1.size()).sum();
-        let mut offset = 0;
-        for (name, vtype) in V::ATTRIBUTES {
-            let location = self.gl.get_attrib_location(&program.program, name);
-            if location < 0 {
-                continue;
-            }
-            let location = location as u32;
-            for i in 0..vtype.elements() {
-                self.ext.vertex_attrib_divisor_angle(location + i, 0);
-            }
-            vtype.layout(&self.gl, location, stride, offset);
-            vtype.enable(&self.gl, location);
-            offset += vtype.size();
-        }
-
-        let instance_buffer = self.gl.create_buffer().expect("Gl Instance Buffer");
-        self.gl
-            .bind_buffer(GL::ARRAY_BUFFER, Some(&instance_buffer));
-        let mut data = Vec::new();
-
-        let mut count = 0;
-        for v in instance_vertexes {
-            v.write(&mut data);
-            count += 1;
-        }
-
-        self.gl
-            .buffer_data_with_u8_array(GL::ARRAY_BUFFER, data.as_slice(), GL::STATIC_DRAW);
-
-        let stride = I::ATTRIBUTES.iter().map(|a| a.1.size()).sum();
-        let mut offset = 0;
-        for (name, vtype) in I::ATTRIBUTES {
-            let location = self.gl.get_attrib_location(&program.program, name);
-            if location < 0 {
-                continue;
-            }
-            let location = location as u32;
-            for i in 0..vtype.elements() {
-                self.ext.vertex_attrib_divisor_angle(location + i, 1);
-            }
-            vtype.layout(&self.gl, location, stride, offset);
-            vtype.enable(&self.gl, location);
-            offset += vtype.size();
-        }
-
-        self.ext
-            .draw_arrays_instanced_angle(self.poly_type, 0, self.poly_count, count)
-            .expect("Instanced Draw");
-
-        for (name, vtype) in I::ATTRIBUTES {
-            let location = self.gl.get_attrib_location(&program.program, name);
-            if location < 0 {
-                continue;
-            }
-            let location = location as u32;
-            for i in 0..vtype.elements() {
-                self.ext.vertex_attrib_divisor_angle(location + i, 0);
-            }
-            vtype.disable(&self.gl, location);
-        }
-
-        self.gl.delete_buffer(Some(&instance_buffer));
-
-        for (name, vtype) in V::ATTRIBUTES {
-            let location = self.gl.get_attrib_location(&program.program, name);
-            if location < 0 {
-                continue;
-            }
-            let location = location as u32;
-            for i in 0..vtype.elements() {
-                self.ext.vertex_attrib_divisor_angle(location + i, 0);
-            }
-            vtype.disable(&self.gl, location);
-        }
-    }
-}
-
-impl<V: AsGlVertex, I: AsGlVertex> Drop for GlInstancedModel<V, I> {
-    fn drop(&mut self) {
-        self.gl.delete_buffer(Some(&self.buffer));
-    }
-}
-
-pub struct GlTexture {
-    gl: GL,
+pub struct GlTexture<'ctx> {
+    gl: &'ctx GlContext,
     texture: WebGlTexture,
 }
 
-impl GlTexture {
-    pub fn new(gl: GL, width: u32, height: u32) -> GlTexture {
+impl<'ctx> GlTexture<'ctx> {
+    pub fn new(gl: &'ctx GlContext, width: u32, height: u32) -> GlTexture<'ctx> {
         let texture = gl.create_texture().expect("Create Texture");
         let buf = vec![0; width as usize * height as usize * 4];
 
@@ -548,34 +595,23 @@ impl GlTexture {
     }
 }
 
-impl Drop for GlTexture {
+impl<'ctx> Drop for GlTexture<'ctx> {
     fn drop(&mut self) {
         self.gl.delete_texture(Some(&self.texture));
     }
 }
 
-impl AsGlUniform for GlTexture {
-    fn bind(&self, gl: &GL, program: &GlProgram, name: &'static str) {
-        let texture_unit = program.next_texture_unit();
-        gl.active_texture(GL::TEXTURE0 + texture_unit);
-        gl.bind_texture(GL::TEXTURE_2D, Some(&self.texture));
-
-        let location = gl.get_uniform_location(&program.program, name);
-        gl.uniform1i(location.as_ref(), texture_unit as i32);
-    }
-}
-
-pub struct GlFramebuffer {
-    texture: GlTexture,
+pub struct GlFramebuffer<'ctx> {
+    gl: &'ctx GlContext,
+    texture: GlTexture<'ctx>,
     frame_buffer: WebGlFramebuffer,
     width: u32,
     height: u32,
-    gl: GL,
 }
 
-impl GlFramebuffer {
-    pub fn new(gl: GL, width: u32, height: u32) -> GlFramebuffer {
-        let texture = GlTexture::new(gl.clone(), width, height);
+impl<'ctx> GlFramebuffer<'ctx> {
+    pub fn new(gl: &'ctx GlContext, width: u32, height: u32) -> GlFramebuffer<'ctx> {
+        let texture = GlTexture::new(gl, width, height);
         let frame_buffer = gl.create_framebuffer().expect("Create FrameBuffer");
         gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&frame_buffer));
         gl.framebuffer_texture_2d(
@@ -612,7 +648,7 @@ impl GlFramebuffer {
     }
 }
 
-impl Drop for GlFramebuffer {
+impl<'ctx> Drop for GlFramebuffer<'ctx> {
     fn drop(&mut self) {
         self.gl.delete_framebuffer(Some(&self.frame_buffer));
     }
@@ -621,6 +657,7 @@ impl Drop for GlFramebuffer {
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_name = ANGLEInstancedArrays)]
+    #[derive(Clone)]
     type AngleInstancedArrays;
 
     #[wasm_bindgen(method, getter, js_name = VERTEX_ATTRIB_ARRAY_DIVISOR_ANGLE)]
@@ -647,4 +684,38 @@ extern "C" {
 
     #[wasm_bindgen(method, js_name = vertexAttribDivisorANGLE)]
     fn vertex_attrib_divisor_angle(this: &AngleInstancedArrays, index: u32, divisor: u32);
+
+    #[wasm_bindgen(js_name = OESVertexArrayObject)]
+    #[derive(Clone)]
+    type OesVertexArrayObject;
+
+    #[wasm_bindgen(js_name = WebGLVertexArrayObject)]
+    type WebGlVertexArrayObject;
+
+    #[wasm_bindgen(method, getter, js_name = VERTEX_ATTRIB_ARRAY_BINDING_OES)]
+    fn vertex_attrib_array_binding_oes(this: &OesVertexArrayObject) -> i32;
+
+    #[wasm_bindgen(method, catch, js_name = createVertexArrayOES)]
+    fn create_vertex_array_oes(
+        this: &OesVertexArrayObject,
+    ) -> Result<WebGlVertexArrayObject, JsValue>;
+
+    #[wasm_bindgen(method, catch, js_name = deleteVertexArrayOES)]
+    fn delete_vertex_array_oes(
+        this: &OesVertexArrayObject,
+        vao: WebGlVertexArrayObject,
+    ) -> Result<(), JsValue>;
+
+    #[wasm_bindgen(method, catch, js_name = bindVertexArrayOES)]
+    fn bind_vertex_array_oes(
+        this: &OesVertexArrayObject,
+        vao: Option<&WebGlVertexArrayObject>,
+    ) -> Result<(), JsValue>;
+
+    #[wasm_bindgen(method, catch, js_name = isVertexArrayOES)]
+    fn is_vertex_array_oes(
+        this: &OesVertexArrayObject,
+        vao: &WebGlVertexArrayObject,
+    ) -> Result<bool, JsValue>;
+
 }

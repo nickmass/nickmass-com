@@ -20,7 +20,7 @@ wasm-pack -V || cargo install wasm-pack
 
 [tasks.build-client]
 command = "wasm-pack"
-args = ["build", "--out-dir", "../public/js", "--target", "web", "./client"]
+args = ["build", "--release", "--out-dir", "../public/js", "--target", "web", "./client"]
 dependencies = ["clean-js", "install-wasm-pack"]
 
 [tasks.build-server]

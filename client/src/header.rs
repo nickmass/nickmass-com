@@ -1,5 +1,5 @@
 use byteorder::{LittleEndian, WriteBytesExt};
-use log::info;
+use gloo_events::EventListener;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{Document, EventTarget, HtmlCanvasElement, MouseEvent, WebGlRenderingContext as GL};
@@ -8,143 +8,177 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::gl::*;
+use crate::shaders::*;
 
 include!("nickmass-com-text.rs");
 
-pub fn create_header(document: Document) -> Option<()> {
-    let window = document
-        .default_view()
-        .expect("unable to get window from document");
+static mut GL_CONTEXT: Option<GlContext> = None;
 
+#[allow(unused)]
+struct Runner<H: SiteHeader> {
+    was_resized: Rc<Cell<bool>>,
+    mouse_position: Rc<Cell<Option<(f32, f32)>>>,
+    resize: EventListener,
+    mouse_move: EventListener,
+    mouse_out: EventListener,
+    _header: std::marker::PhantomData<H>,
+}
+
+impl<H: SiteHeader> Runner<H> {
+    pub fn new(mut header: H) -> Self {
+        let window = web_sys::window().unwrap();
+        let window_et: &EventTarget = window.as_ref();
+        let header_et = header.event_target();
+
+        let was_resized = Rc::new(Cell::new(true));
+        let resize = EventListener::new(window_et, "resize", {
+            let was_resized = was_resized.clone();
+            move |_event| {
+                was_resized.set(true);
+            }
+        });
+
+        let mouse_position = Rc::new(Cell::new(None));
+        let mouse_move = EventListener::new(header_et, "mousemove", {
+            let mouse_position = mouse_position.clone();
+            move |event| {
+                let mouse_event = event.dyn_ref::<MouseEvent>().unwrap();
+                mouse_position.set(Some((
+                    mouse_event.offset_x() as f32,
+                    mouse_event.offset_y() as f32,
+                )));
+            }
+        });
+
+        let mouse_out = EventListener::new(header_et, "mouseout", {
+            let mouse_position = mouse_position.clone();
+            move |_event| {
+                mouse_position.set(None);
+            }
+        });
+
+        let tick_cb = Rc::new(RefCell::new(None));
+
+        *tick_cb.borrow_mut() = Some(Closure::wrap(Box::new({
+            let window = window.clone();
+            let tick_cb = tick_cb.clone();
+            let was_resized = was_resized.clone();
+            let mouse_position = mouse_position.clone();
+            move |time: f64| {
+                if was_resized.get() {
+                    was_resized.set(false);
+                    header.resize();
+                }
+
+                let is_alive = header.tick(time, mouse_position.get());
+                if is_alive {
+                    let tick = tick_cb.borrow();
+                    let cb: &Closure<dyn FnMut(f64)> = tick.as_ref().unwrap();
+                    let _ = window.request_animation_frame(cb.as_ref().unchecked_ref());
+                } else {
+                    *tick_cb.borrow_mut() = None;
+                }
+            }
+        }) as Box<dyn FnMut(f64)>));
+
+        let tick = tick_cb.borrow();
+        let cb = tick.as_ref().unwrap();
+        let _ = window.request_animation_frame(cb.as_ref().unchecked_ref());
+
+        Self {
+            was_resized,
+            mouse_position,
+            resize,
+            mouse_move,
+            mouse_out,
+            _header: Default::default(),
+        }
+    }
+
+    pub fn forget(self) {
+        std::mem::forget(self)
+    }
+}
+
+trait SiteHeader: 'static {
+    fn event_target(&self) -> &EventTarget;
+    fn resize(&mut self);
+    fn tick(&mut self, time: f64, mouse_position: Option<(f32, f32)>) -> bool;
+}
+
+impl SiteHeader for Header<'static> {
+    fn event_target(&self) -> &EventTarget {
+        self.gl.canvas().as_ref()
+    }
+
+    fn resize(&mut self) {
+        Header::resize(self);
+    }
+
+    fn tick(&mut self, time: f64, mouse_position: Option<(f32, f32)>) -> bool {
+        Header::tick(self, time, mouse_position);
+        self.is_alive()
+    }
+}
+
+pub fn create_header(document: &Document) -> Option<()> {
     let canvas = document
         .query_selector("canvas#header-canvas")
         .unwrap_or(None)
         .and_then(|e| e.dyn_into::<HtmlCanvasElement>().ok())?;
 
-    let header = Header::new(&canvas);
-    if let Some(mut header) = header {
-        header.initialize();
-        let header_func_inner = Rc::new(RefCell::new(None));
-        let header_func = header_func_inner.clone();
+    let header = unsafe {
+        if GL_CONTEXT.is_some() {
+            panic!("Context already initialized");
+        }
+        GL_CONTEXT = Some(GlContext::new(canvas));
+        Header::new(GL_CONTEXT.as_ref().unwrap())
+    };
 
-        let window_inner = window.clone();
-
-        let was_resized = Rc::new(Cell::new(true));
-        let was_resized_inner = was_resized.clone();
-
-        let mouse_pos = Rc::new(Cell::new(Option::<(f32, f32)>::None));
-        let mouse_move_pos = mouse_pos.clone();
-        let mouse_leave_pos = mouse_pos.clone();
-
-        *header_func.borrow_mut() = Some(Closure::wrap(Box::new(move || {
-            if was_resized_inner.get() {
-                was_resized_inner.set(false);
-                header.resize();
-            }
-            header.tick(mouse_pos.get());
-            if header.is_alive() {
-                let header_fun = header_func_inner.borrow();
-                let cb: &Closure<FnMut()> = header_fun.as_ref().unwrap();
-                let _ = window_inner.request_animation_frame(cb.as_ref().unchecked_ref());
-            } else {
-                *header_func_inner.borrow_mut() = None;
-            }
-        }) as Box<FnMut()>));
-
-        let header_fun = header_func.borrow();
-        let cb = header_fun.as_ref().unwrap();
-        let _ = window.request_animation_frame(cb.as_ref().unchecked_ref());
-
-        let resize_et: &EventTarget = window.as_ref();
-        let resize_cb = Closure::wrap(Box::new(move || {
-            was_resized.set(true);
-        }) as Box<FnMut()>);
-        let _ = resize_et
-            .add_event_listener_with_callback("resize", resize_cb.as_ref().unchecked_ref())
-            .unwrap();
-        resize_cb.forget();
-
-        let canvas_et: &EventTarget = canvas.as_ref();
-
-        let mouse_move_cb = Closure::wrap(Box::new(move |e: MouseEvent| {
-            mouse_move_pos.set(Some((e.offset_x() as f32, e.offset_y() as f32)));
-        }) as Box<FnMut(MouseEvent)>);
-        let _ = canvas_et
-            .add_event_listener_with_callback("mousemove", mouse_move_cb.as_ref().unchecked_ref())
-            .unwrap();
-        mouse_move_cb.forget();
-
-        let mouse_leave_cb = Closure::wrap(Box::new(move || {
-            mouse_leave_pos.set(None);
-        }) as Box<FnMut()>);
-        let _ = canvas_et
-            .add_event_listener_with_callback("mouseout", mouse_leave_cb.as_ref().unchecked_ref())
-            .unwrap();
-        mouse_leave_cb.forget();
-    } else {
-        info!("Unable to initialize header context");
-        return None;
-    }
+    let runner = Runner::new(header);
+    runner.forget();
 
     Some(())
 }
 
-struct Header {
-    canvas: HtmlCanvasElement,
-    gl: GL,
+struct Header<'ctx> {
+    gl: &'ctx GlContext,
     count: u32,
     alive: bool,
-    color_cycle: ColorCycle,
-    circles: CircleCollection,
-    mouse_circle: MouseCircle,
-    logo: Logo,
+    color_cycle: ColorCycle<'ctx>,
+    circles: CircleCollection<'ctx>,
+    mouse_circle: MouseCircle<'ctx>,
+    logo: Logo<'ctx>,
     width: f32,
     height: f32,
-    buffer_width: f32,
-    buffer_height: f32,
-    frame_buffer: GlFramebuffer,
+    frame_buffer: GlFramebuffer<'ctx>,
 }
 
-impl Header {
-    fn new(canvas: &HtmlCanvasElement) -> Option<Header> {
-        let gl = canvas
-            .get_context("webgl")
-            .unwrap_or(None)
-            .and_then(|e| e.dyn_into::<GL>().ok())?;
-
-        let cycle_gl = gl.clone();
-        let inner_gl = gl.clone();
-
+impl<'ctx> Header<'ctx> {
+    fn new(gl: &'ctx GlContext) -> Self {
         let buffer_width = gl.drawing_buffer_width() as f32;
         let buffer_height = gl.drawing_buffer_height() as f32;
 
-        let width = canvas.client_width() as f32;
-        let height = canvas.client_height() as f32;
+        let width = gl.canvas().client_width() as f32;
+        let height = gl.canvas().client_height() as f32;
 
-        let frame_buffer =
-            GlFramebuffer::new(gl.clone(), buffer_width as u32, buffer_height as u32);
+        let frame_buffer = GlFramebuffer::new(gl, buffer_width as u32, buffer_height as u32);
 
-        Some(Header {
-            canvas: canvas.clone(),
+        gl.viewport(0, 0, buffer_width as i32, buffer_height as i32);
+        gl.color_mask(true, true, true, true);
+
+        Self {
             gl,
             count: 0,
             alive: true,
-            color_cycle: ColorCycle::new(cycle_gl),
-            circles: CircleCollection::new(&inner_gl),
-            mouse_circle: MouseCircle::new(&inner_gl, width, height),
-            logo: Logo::new(&inner_gl, width, height),
+            color_cycle: ColorCycle::new(gl),
+            circles: CircleCollection::new(&gl),
+            mouse_circle: MouseCircle::new(&gl, width, height),
+            logo: Logo::new(gl, width, height),
             width,
             height,
-            buffer_width,
-            buffer_height,
             frame_buffer,
-        })
-    }
-
-    fn initialize(&mut self) {
-        self.gl
-            .viewport(0, 0, self.buffer_width as i32, self.buffer_height as i32);
-        self.gl.color_mask(true, true, true, true);
+        }
     }
 
     fn matrix(&self) -> [f32; 9] {
@@ -161,7 +195,7 @@ impl Header {
         ]
     }
 
-    fn tick(&mut self, mouse_pos: Option<(f32, f32)>) {
+    fn tick(&mut self, _time: f64, mouse_pos: Option<(f32, f32)>) {
         self.count += 1;
 
         self.color_cycle.tick();
@@ -191,8 +225,8 @@ impl Header {
     }
 
     fn resize(&mut self) {
-        self.width = self.canvas.client_width() as f32;
-        self.height = self.canvas.client_height() as f32;
+        self.width = self.gl.canvas().client_width() as f32;
+        self.height = self.gl.canvas().client_height() as f32;
         self.mouse_circle.resize(self.width, self.height);
         self.logo.resize(self.width, self.height);
     }
@@ -202,16 +236,16 @@ impl Header {
     }
 }
 
-struct ColorCycle {
-    gl: GL,
+struct ColorCycle<'ctx> {
+    gl: &'ctx GlContext,
     r: f32,
     g: f32,
     b: f32,
     increment: f32,
 }
 
-impl ColorCycle {
-    fn new(gl: GL) -> ColorCycle {
+impl<'ctx> ColorCycle<'ctx> {
+    fn new(gl: &'ctx GlContext) -> ColorCycle<'ctx> {
         let offset = rand::random::<f32>() * 2.0;
         ColorCycle {
             gl,
@@ -332,6 +366,7 @@ impl AsGlVertex for CircleInstance {
         ("a_color", GlValueType::Vec3),
     ];
     const POLY_TYPE: u32 = GL::TRIANGLE_FAN;
+    const SIZE: usize = 48;
     fn write(&self, mut buf: impl std::io::Write) {
         for f in &self.matrix {
             let _ = buf.write_f32::<LittleEndian>(*f);
@@ -343,22 +378,22 @@ impl AsGlVertex for CircleInstance {
     }
 }
 
-struct CircleCollection {
+struct CircleCollection<'ctx> {
     circles: Vec<Circle>,
-    circle_model: GlInstancedModel<CircleVertex, CircleInstance>,
-    circle_program: GlInstancedProgram,
+    circle_model: GlModel<'ctx, CircleVertex>,
+    circle_program: GlProgram<'ctx>,
 }
 
-impl CircleCollection {
-    fn new(gl: &GL) -> CircleCollection {
+impl<'ctx> CircleCollection<'ctx> {
+    fn new(gl: &'ctx GlContext) -> CircleCollection {
         let mut circles = Vec::new();
 
         for _ in 0..150 {
             circles.push(Circle::new());
         }
 
-        let circle_model = GlInstancedModel::new(gl.clone(), Circle::model());
-        let circle_program = GlInstancedProgram::new(gl.clone(), CIRCLE_VERT, CIRCLE_FRAG);
+        let circle_model = GlModel::new(gl, Circle::model());
+        let circle_program = GlProgram::with_shader::<CircleShader>(gl);
 
         CircleCollection {
             circles,
@@ -385,25 +420,26 @@ impl CircleCollection {
             .add("u_alpha", &1.0);
 
         self.circle_program
-            .draw(&self.circle_model, instance_verts, &uniforms);
+            .draw_instanced(&self.circle_model, instance_verts, &uniforms);
     }
 }
-struct MouseCircle {
+
+struct MouseCircle<'ctx> {
     circle: Circle,
     pos_x: f32,
     pos_y: f32,
     in_bounds: bool,
     width: f32,
     height: f32,
-    circle_model: GlInstancedModel<CircleVertex, CircleInstance>,
-    circle_program: GlInstancedProgram,
+    circle_model: GlModel<'ctx, CircleVertex>,
+    circle_program: GlProgram<'ctx>,
     count: f32,
 }
 
-impl MouseCircle {
-    fn new(gl: &GL, width: f32, height: f32) -> MouseCircle {
-        let circle_model = GlInstancedModel::new(gl.clone(), Circle::model());
-        let circle_program = GlInstancedProgram::new(gl.clone(), CIRCLE_VERT, CIRCLE_FRAG);
+impl<'ctx> MouseCircle<'ctx> {
+    fn new(gl: &'ctx GlContext, width: f32, height: f32) -> MouseCircle<'ctx> {
+        let circle_model = GlModel::new(gl, Circle::model());
+        let circle_program = GlProgram::with_shader::<CircleShader>(gl);
         MouseCircle {
             circle: Circle::new(),
             pos_x: 0.0,
@@ -462,27 +498,31 @@ impl MouseCircle {
             color: [1.0, 1.0, 1.0],
         };
 
-        self.circle_program
-            .draw(&self.circle_model, std::iter::once(instance), &uniforms);
+        self.circle_program.draw_instanced(
+            &self.circle_model,
+            std::iter::once(instance),
+            &uniforms,
+        );
     }
 }
 
-struct Logo {
-    quad_model: GlModel<QuadVertex>,
-    quad_program: GlProgram,
-    logo_model: GlModel<SimpleVertex>,
-    logo_program: GlProgram,
+struct Logo<'ctx> {
+    quad_model: GlModel<'ctx, QuadVertex>,
+    quad_program: GlProgram<'ctx>,
+    logo_model: GlModel<'ctx, SimpleVertex>,
+    logo_program: GlProgram<'ctx>,
     width: f32,
     height: f32,
     mouse_pos: (f32, f32),
 }
-impl Logo {
-    fn new(gl: &GL, width: f32, height: f32) -> Logo {
-        let quad_model = GlModel::new(gl.clone(), QuadVertex::model());
-        let quad_program = GlProgram::new(gl.clone(), QUAD_VERT, QUAD_FRAG);
 
-        let logo_model = GlModel::new(gl.clone(), SimpleVertex::logo_text());
-        let logo_program = GlProgram::new(gl.clone(), LOGO_VERT, LOGO_FRAG);
+impl<'ctx> Logo<'ctx> {
+    fn new(gl: &'ctx GlContext, width: f32, height: f32) -> Logo {
+        let quad_model = GlModel::new(gl, QuadVertex::model());
+        let quad_program = GlProgram::with_shader::<QuadShader>(gl);
+
+        let logo_model = GlModel::new(gl, SimpleVertex::logo_text());
+        let logo_program = GlProgram::with_shader::<LogoShader>(gl);
 
         Logo {
             quad_model,
@@ -565,6 +605,7 @@ impl AsGlVertex for CircleVertex {
         ("a_alpha", GlValueType::Float),
     ];
     const POLY_TYPE: u32 = GL::TRIANGLE_FAN;
+    const SIZE: usize = 12;
     fn write(&self, mut buf: impl std::io::Write) {
         let _ = buf.write_f32::<LittleEndian>(self.x);
         let _ = buf.write_f32::<LittleEndian>(self.y);
@@ -583,6 +624,7 @@ impl AsGlVertex for QuadVertex {
         ("a_uv", GlValueType::Vec2),
     ];
     const POLY_TYPE: u32 = GL::TRIANGLE_STRIP;
+    const SIZE: usize = 16;
     fn write(&self, mut buf: impl std::io::Write) {
         let _ = buf.write_f32::<LittleEndian>(self.position.0);
         let _ = buf.write_f32::<LittleEndian>(self.position.1);
@@ -623,6 +665,7 @@ struct SimpleVertex {
 impl AsGlVertex for SimpleVertex {
     const ATTRIBUTES: &'static [(&'static str, GlValueType)] = &[("a_position", GlValueType::Vec2)];
     const POLY_TYPE: u32 = GL::TRIANGLES;
+    const SIZE: usize = 8;
     fn write(&self, mut buf: impl std::io::Write) {
         let _ = buf.write_f32::<LittleEndian>(self.position.0);
         let _ = buf.write_f32::<LittleEndian>(self.position.1);
@@ -643,98 +686,3 @@ impl SimpleVertex {
 }
 
 const CIRCLE_TRI_COUNT: usize = 32;
-
-const CIRCLE_VERT: &str = r#"
-precision highp float;
-
-attribute mat3 a_model_matrix;
-attribute vec2 a_position;
-attribute float a_alpha;
-attribute vec3 a_color;
-
-varying float v_alpha;
-varying vec3 v_color;
-
-uniform mat3 u_view_matrix;
-
-void main() {
-  vec3 pos = vec3(a_position, 1.0) * a_model_matrix * u_view_matrix;
-  v_alpha = a_alpha;
-  v_color = a_color;
-  gl_Position = vec4(pos.xy / pos.z, 1.0, 1.0);
-}
-"#;
-
-const CIRCLE_FRAG: &str = r#"
-precision highp float;
-
-varying float v_alpha;
-varying vec3 v_color;
-
-uniform float u_alpha;
-
-void main() {
-  gl_FragColor = vec4(v_color * v_alpha * u_alpha, v_alpha * u_alpha);
-}
-"#;
-
-const QUAD_VERT: &str = r#"
-precision highp float;
-
-attribute vec2 a_position;
-attribute vec2 a_uv;
-
-uniform mat3 u_view_matrix;
-
-varying vec2 v_uv;
-
-void main() {
-  vec3 pos = vec3(a_position, 1.0) * u_view_matrix;
-  v_uv = (vec2(pos.x / pos.z, pos.y / pos.z * -1.0) + 1.0) / 2.0;
-  gl_Position = vec4(pos.xy / pos.z, 1.0, 1.0);
-}
-"#;
-
-const QUAD_FRAG: &str = r#"
-precision highp float;
-
-varying vec2 v_uv;
-
-uniform sampler2D u_tex_sampler;
-
-void main() {
-  vec4 color = texture2D(u_tex_sampler, v_uv);
-  gl_FragColor = vec4(color.xyz, 1.0);
-}
-"#;
-
-const LOGO_VERT: &str = r#"
-precision highp float;
-
-attribute vec2 a_position;
-
-varying vec2 v_uv;
-
-uniform mat3 u_view_matrix;
-uniform mat3 u_model_matrix;
-
-void main() {
-  vec3 pos = vec3(a_position, 1.0) * u_model_matrix * u_view_matrix;
-  v_uv = (vec2(pos.x / pos.z, pos.y / pos.z * -1.0) + 1.0) / 2.0;
-  gl_Position = vec4(pos.xy / pos.z, 1.0, 1.0);
-}
-"#;
-
-const LOGO_FRAG: &str = r#"
-precision highp float;
-
-varying vec2 v_uv;
-
-uniform sampler2D u_frame_sampler;
-
-void main() {
-  vec4 frame_color = texture2D(u_frame_sampler, v_uv);
-  vec4 logo_color = (1.0 - frame_color) * 1.8;
-  gl_FragColor = vec4(logo_color.xyz, 1.0);
-}
-"#;
