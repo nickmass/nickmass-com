@@ -1,4 +1,4 @@
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 use super::users::User;
 
@@ -34,7 +34,6 @@ pub struct GoogleToken {
 
 impl GoogleToken {
     fn deser<'d, D: serde::Deserializer<'d>>(de: D) -> Result<GoogleToken, D::Error> {
-        use serde::Deserialize;
         let base64 = String::deserialize(de)?;
         let token = jwt::Token::parse(base64.as_str())
             .map_err(|e| serde::de::Error::custom(format!("{:?}", e)))?;
@@ -103,5 +102,12 @@ impl<T> std::ops::Deref for Authenticated<T> {
     type Target = T;
     fn deref(&self) -> &T {
         &self.resource
+    }
+}
+
+impl<T> std::ops::DerefMut for Authenticated<T> {
+    //type Target = T;
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.resource
     }
 }

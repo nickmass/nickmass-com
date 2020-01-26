@@ -1,6 +1,7 @@
 use std::fmt;
 
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
+use warp::reject::Reject;
 
 #[derive(Debug)]
 pub enum Error {
@@ -11,8 +12,10 @@ pub enum Error {
     Unauthorized,
     NotFound,
     IpRequired,
-    Void(Void),
+    Timeout(tokio::time::Elapsed),
 }
+
+impl Reject for Error {}
 
 #[derive(Debug)]
 pub enum Resource {
@@ -45,9 +48,9 @@ impl From<reqwest::Error> for Error {
     }
 }
 
-impl From<Void> for Error {
-    fn from(other: Void) -> Self {
-        Error::Void(other)
+impl From<tokio::time::Elapsed> for Error {
+    fn from(other: tokio::time::Elapsed) -> Self {
+        Error::Timeout(other)
     }
 }
 
@@ -61,24 +64,12 @@ impl fmt::Display for Error {
             Error::Render((name, err)) => write!(f, "Failed to render {} {}", name, err),
             Error::NotFound => write!(f, "Not found"),
             Error::IpRequired => write!(f, "Ip required for session data"),
-            Error::Void(_v) => unreachable!(),
+            Error::Timeout(timeout) => write!(f, "Timeout: {}", timeout),
         }
     }
 }
 
 impl std::error::Error for Error {}
-
-#[allow(dead_code)]
-#[derive(Debug)]
-pub enum Void {}
-
-impl std::fmt::Display for Void {
-    fn fmt(&self, _: &mut std::fmt::Formatter) -> std::fmt::Result {
-        unreachable!()
-    }
-}
-
-impl std::error::Error for Void {}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JsonError {

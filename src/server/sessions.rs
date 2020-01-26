@@ -1,9 +1,6 @@
-use futures::{future, Future};
-use redis::PipelineCommands;
 use ring::{aead, rand};
 
 use super::db::Connection;
-use super::error::Void;
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -30,37 +27,34 @@ impl Session {
         }
     }
 
-    pub fn get_store(
-        &self,
-        addr: IpAddr,
-        sid: Option<impl AsRef<str>>,
-    ) -> impl Future<Item = Store, Error = Void> {
+    pub async fn get_store(mut self, addr: IpAddr, sid: Option<impl AsRef<str>>) -> Store {
         if let Some((sid, key)) =
             sid.and_then(|sid| self.decode_sid(addr, &sid).map(|key| (sid, key)))
         {
-            let ok_key = key.clone();
-            let ok_sid = sid.as_ref().to_string();
-            let fut = redis::cmd("hgetall")
-                .arg(format!("session:{}", key))
-                .query_async(self.db.clone())
-                .map(move |(_conn, hash)| Store::new(ok_key, ok_sid, hash))
-                .or_else(move |_e| Ok(Store::empty(key, sid.as_ref())));
-            future::Either::A(fut)
+            let session_key = format!("session:{}", key);
+            let store = redis::cmd("hgetall")
+                .arg(session_key)
+                .query_async(&mut self.db)
+                .await;
+
+            let store = match store {
+                Ok(hash) => Store::new(key, sid.as_ref(), hash),
+                Err(_) => Store::empty(key, sid.as_ref()),
+            };
+            store
         } else {
             let key = self.create_key();
             let sid = self.create_sid(&key, addr);
-            future::Either::B(future::ok(Store::empty(key, sid)))
+            Store::empty(key, sid)
         }
     }
 
-    pub fn set_store(&self, store: Store) -> impl Future<Item = (), Error = Void> {
+    pub async fn set_store(mut self, store: Store) {
         let mut pipe = redis::pipe();
-        let redis_key = format!("session:{}", store.key);
-        pipe.hset_multiple(redis_key.as_str(), store.values().as_slice());
-        pipe.expire(redis_key.as_str(), 60 * 60 * 24 * 90);
-        pipe.query_async(self.db.clone())
-            .map(|_: (_, ())| ())
-            .or_else(|_e| Ok(()))
+        let session_key = format!("session:{}", store.key);
+        pipe.hset_multiple(session_key.as_str(), store.values().as_slice());
+        pipe.expire(session_key.as_str(), 60 * 60 * 24 * 90);
+        let _: Result<(), _> = pipe.query_async(&mut self.db).await;
     }
 
     fn decode_sid(&self, addr: IpAddr, sid: impl AsRef<str>) -> Option<String> {

@@ -1,9 +1,11 @@
 #![recursion_limit = "128"]
+#![type_length_limit = "2022793"]
 
 mod server;
 use server::Config;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let config = Config::load();
     let mut builder = env_logger::Builder::new();
     match (config.verbosity, config.silent) {
@@ -16,5 +18,5 @@ fn main() {
         _ => builder.filter(None, log::LevelFilter::Trace),
     };
     builder.write_style(env_logger::WriteStyle::Auto).init();
-    server::run(config);
+    server::run(config).await;
 }

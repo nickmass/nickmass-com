@@ -1,5 +1,4 @@
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
-use serde_derive::{Deserialize, Serialize};
 use structopt::{clap, StructOpt};
 use warp::http::Uri;
 
@@ -8,14 +7,16 @@ use std::io::Read;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
+type Bytes = Vec<u8>;
+
 #[derive(Debug, Default, StructOpt, Serialize, Deserialize)]
 pub struct ConfigBuilder {
     #[serde(deserialize_with = "deserialize_base64")]
     #[serde(serialize_with = "serialize_base64")]
     #[serde(default)]
-    #[structopt(long = "session_key", parse(try_from_str = "parse_base64"))]
+    #[structopt(long = "session_key", parse(try_from_str = parse_base64))]
     /// The secret key to use for storing session data
-    pub session_key: Option<Vec<u8>>,
+    pub session_key: Option<Bytes>,
     #[serde(deserialize_with = "deserialize_uri")]
     #[serde(serialize_with = "serialize_uri")]
     #[serde(default)]

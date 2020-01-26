@@ -1,6 +1,4 @@
-use futures::{future, Future};
-use redis::PipelineCommands;
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 use super::auth::Authenticated;
 use super::db::Connection;
@@ -95,176 +93,150 @@ impl PostClient {
         PostClient { db }
     }
 
-    pub fn get_all(&self, limit: i64, skip: i64) -> impl Future<Item = PostPage, Error = Error> {
-        redis::cmd("lrange")
+    pub async fn get_all(mut self, limit: i64, skip: i64) -> Result<PostPage, Error> {
+        let post_ids: Vec<i64> = redis::cmd("lrange")
             .arg("posts")
             .arg(skip)
             .arg(limit - 1 + skip)
-            .query_async(self.db.clone())
-            .from_err::<Error>()
-            .and_then(|(conn, post_ids): (_, Vec<i64>)| {
-                let mut pipe = redis::Pipeline::with_capacity(post_ids.len());
+            .query_async(&mut self.db)
+            .await?;
+        let mut pipe = redis::Pipeline::with_capacity(post_ids.len());
 
-                for id in post_ids {
-                    pipe.hgetall(format!("post:{}", id));
-                }
+        for id in post_ids {
+            pipe.hgetall(format!("post:{}", id));
+        }
 
-                pipe.query_async(conn).from_err::<Error>()
-            })
-            .and_then(|(conn, posts): (_, Vec<MaybePost>)| {
-                let posts: Vec<Post> = posts.into_iter().filter_map(Option::from).collect();
-                let mut author_ids: Vec<_> = posts.iter().map(|p| p.author_id).collect();
-                author_ids.sort_unstable();
-                author_ids.dedup();
-                let mut pipe = redis::Pipeline::with_capacity(author_ids.len());
+        let posts: Vec<MaybePost> = pipe.query_async(&mut self.db).await?;
 
-                for id in &author_ids {
-                    pipe.hgetall(format!("user:{}", id));
-                }
+        let mut posts: Vec<Post> = posts.into_iter().filter_map(Option::from).collect();
+        let mut author_ids: Vec<_> = posts.iter().map(|p| p.author_id).collect();
+        author_ids.sort_unstable();
+        author_ids.dedup();
 
-                pipe.query_async(conn)
-                    .from_err::<Error>()
-                    .join(future::ok(posts))
-            })
-            .and_then(|((conn, authors), mut posts): ((_, Vec<MaybeUser>), _)| {
-                let authors: Vec<User> = authors.into_iter().filter_map(Option::from).collect();
-                let author_map: HashMap<_, _> = authors.into_iter().map(|u| (u.id, u)).collect();
+        let mut pipe = redis::Pipeline::with_capacity(author_ids.len());
 
-                posts.iter_mut().for_each(|p| {
-                    p.author = author_map.get(&p.author_id).map(|u| u.name.clone());
-                });
+        for id in &author_ids {
+            pipe.hgetall(format!("user:{}", id));
+        }
 
-                redis::cmd("llen")
-                    .arg("posts")
-                    .query_async(conn)
-                    .from_err::<Error>()
-                    .join(future::ok(posts))
-            })
-            .map(move |((_conn, total), posts): ((_, i64), _)| PostPage {
-                posts,
-                total,
-                has_more: total > limit + skip,
-            })
+        let authors: Vec<MaybeUser> = pipe.query_async(&mut self.db).await?;
+
+        let authors: Vec<User> = authors.into_iter().filter_map(Option::from).collect();
+        let author_map: HashMap<_, _> = authors.into_iter().map(|u| (u.id, u)).collect();
+
+        posts.iter_mut().for_each(|p| {
+            p.author = author_map.get(&p.author_id).map(|u| u.name.clone());
+        });
+
+        let total: i64 = redis::cmd("llen")
+            .arg("posts")
+            .query_async(&mut self.db)
+            .await?;
+        Ok(PostPage {
+            posts,
+            total,
+            has_more: total > limit + skip,
+        })
     }
 
-    pub fn get(&self, id: u64) -> impl Future<Item = Post, Error = Error> {
-        Self::get_by_id(self.db.clone(), id)
+    pub async fn get(mut self, id: u64) -> Result<Post, Error> {
+        Self::get_by_id(&mut self.db, id).await
     }
 
-    pub fn get_by_fragment(
-        &self,
-        fragment: impl AsRef<str>,
-    ) -> impl Future<Item = Post, Error = Error> {
-        redis::cmd("get")
-            .arg(format!("postFragment:{}", fragment.as_ref()))
-            .query_async(self.db.clone())
-            .from_err::<Error>()
-            .and_then(|(conn, id)| Self::get_by_id(conn, id))
+    pub async fn get_by_fragment(mut self, fragment: impl AsRef<str>) -> Result<Post, Error> {
+        let fragment_key: String = format!("postFragment:{}", fragment.as_ref());
+        let id = redis::cmd("get")
+            .arg(fragment_key)
+            .query_async(&mut self.db)
+            .await?;
+        Self::get_by_id(&mut self.db, id).await
     }
 
-    fn get_by_id(db: Connection, id: u64) -> impl Future<Item = Post, Error = Error> {
-        redis::cmd("hgetall")
-            .arg(format!("post:{}", id))
-            .query_async(db)
-            .from_err::<Error>()
-            .and_then(move |(conn, post): (_, MaybePost)| {
-                if let Some(post) = Option::<Post>::from(post) {
-                    future::Either::A(
-                        redis::cmd("hget")
-                            .arg(format!("user:{}", post.author_id))
-                            .arg("name")
-                            .query_async(conn)
-                            .from_err::<Error>()
-                            .join(future::ok(post)),
-                    )
-                } else {
-                    future::Either::B(future::err(Error::ResourceNotFound(Resource::Post(id))))
-                }
-            })
-            .map(|((_conn, author), mut post)| {
-                post.author = author;
-                post
-            })
+    async fn get_by_id(db: &mut Connection, id: u64) -> Result<Post, Error> {
+        let post_key = format!("post:{}", id);
+        let post: MaybePost = redis::cmd("hgetall").arg(post_key).query_async(db).await?;
+        if let Some(mut post) = Option::<Post>::from(post) {
+            let author: String = format!("user:{}", post.author_id);
+            let author = redis::cmd("hget")
+                .arg(author)
+                .arg("name")
+                .query_async(db)
+                .await?;
+            post.author = author;
+            Ok(post)
+        } else {
+            Err(Error::ResourceNotFound(Resource::Post(id)))
+        }
     }
 }
 
 impl Authenticated<PostClient> {
-    pub fn create(&self, mut post: Post) -> impl Future<Item = u64, Error = Error> {
+    pub async fn create(mut self, mut post: Post) -> Result<u64, Error> {
         post.id = 0;
         post.author_id = self.user().id;
         post.date = chrono::Utc::now().timestamp_millis() as u64;
 
-        redis::cmd("incr")
+        let post_id = redis::cmd("incr")
             .arg("nextPostId")
-            .query_async(self.db.clone())
-            .from_err::<Error>()
-            .and_then(|(conn, post_id)| {
-                post.id = post_id;
-                let mut pipe = redis::pipe();
-                pipe.lpush("posts", post_id).ignore();
-                pipe.set(format!("postFragment:{}", post.url_fragment), post.id)
-                    .ignore();
-                pipe.hset_multiple(
-                    format!("post:{}", post_id),
-                    &[
-                        ("id", post_id.to_string()),
-                        ("title", post.title),
-                        ("content", post.content),
-                        ("date", post.date.to_string()),
-                        ("authorId", post.author_id.to_string()),
-                        ("urlFragment", post.url_fragment),
-                    ],
-                )
-                .ignore();
-                pipe.query_async(conn)
-                    .from_err::<Error>()
-                    .map(move |(conn, _): (_, ())| (conn, post_id))
-            })
-            .and_then(|(conn, post_id)| {
-                redis::cmd("bgsave")
-                    .query_async(conn)
-                    .from_err::<Error>()
-                    .map(move |_: (_, ())| post_id)
-            })
+            .query_async(&mut self.db)
+            .await?;
+
+        post.id = post_id;
+
+        let fragment_key = format!("postFragment:{}", post.url_fragment);
+        let post_key = format!("post:{}", post_id);
+
+        let mut pipe = redis::pipe();
+        pipe.lpush("posts", post_id).ignore();
+        pipe.set(fragment_key, post.id).ignore();
+        pipe.hset_multiple(
+            post_key,
+            &[
+                ("id", post_id.to_string()),
+                ("title", post.title),
+                ("content", post.content),
+                ("date", post.date.to_string()),
+                ("authorId", post.author_id.to_string()),
+                ("urlFragment", post.url_fragment),
+            ],
+        )
+        .ignore();
+
+        let _: () = pipe.query_async(&mut self.db).await?;
+        let _: () = redis::cmd("bgsave").query_async(&mut self.db).await?;
+
+        Ok(post.id)
     }
 
-    pub fn update(&self, id: u64, post: Post) -> impl Future<Item = u64, Error = Error> {
-        redis::cmd("hexists")
-            .arg(format!("post:{}", id))
-            .query_async(self.db.clone())
-            .from_err::<Error>()
-            .and_then(move |(conn, exists): (_, bool)| {
-                if !exists {
-                    future::Either::A(future::err(Error::ResourceNotFound(Resource::Post(id))))
-                } else {
-                    let mut pipe = redis::pipe();
-                    pipe.set(format!("postFragment:{}", post.url_fragment), id)
-                        .ignore();
-                    pipe.hset_multiple(
-                        format!("post:{}", post.id),
-                        &[
-                            ("title", post.title),
-                            ("content", post.content),
-                            ("urlFragment", post.url_fragment),
-                        ],
-                    )
-                    .ignore();
-                    let fut = pipe
-                        .query_async(conn)
-                        .from_err::<Error>()
-                        .map(move |(conn, _): (_, ())| (conn, id))
-                        .and_then(|(conn, post_id)| {
-                            redis::cmd("bgsave")
-                                .query_async(conn)
-                                .from_err::<Error>()
-                                .map(move |_: (_, ())| post_id)
-                        });
-                    future::Either::B(fut)
-                }
-            })
+    pub async fn update(mut self, id: u64, post: Post) -> Result<u64, Error> {
+        let post_key = format!("post:{}", id);
+        let exists: bool = redis::cmd("hexists")
+            .arg(post_key.clone())
+            .query_async(&mut self.db)
+            .await?;
+        if !exists {
+            Err(Error::ResourceNotFound(Resource::Post(id)))
+        } else {
+            let mut pipe = redis::pipe();
+            let fragment_key = format!("postFragment:{}", post.url_fragment);
+            pipe.set(fragment_key, id).ignore();
+            pipe.hset_multiple(
+                post_key,
+                &[
+                    ("title", post.title),
+                    ("content", post.content),
+                    ("urlFragment", post.url_fragment),
+                ],
+            )
+            .ignore();
+
+            let _: () = pipe.query_async(&mut self.db).await?;
+            let _: () = redis::cmd("bgsave").query_async(&mut self.db).await?;
+            Ok(id)
+        }
     }
 
-    pub fn delete(&self, _id: u64) -> impl Future<Item = (), Error = Error> {
-        futures::future::err(Error::NotFound)
+    pub async fn delete(self, _id: u64) -> Result<(), Error> {
+        Err(Error::NotFound)
     }
 }

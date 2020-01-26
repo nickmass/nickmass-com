@@ -100,7 +100,7 @@ impl<H: SiteHeader> Runner<H> {
     }
 }
 
-trait SiteHeader: 'static {
+pub trait SiteHeader: 'static {
     fn event_target(&self) -> &EventTarget;
     fn resize(&mut self);
     fn tick(&mut self, time: f64, mouse_position: Option<(f32, f32)>) -> bool;
@@ -127,16 +127,22 @@ pub fn create_header(document: &Document) -> Option<()> {
         .unwrap_or(None)
         .and_then(|e| e.dyn_into::<HtmlCanvasElement>().ok())?;
 
-    let header = unsafe {
+    unsafe {
         if GL_CONTEXT.is_some() {
             panic!("Context already initialized");
         }
         GL_CONTEXT = Some(GlContext::new(canvas));
-        Header::new(GL_CONTEXT.as_ref().unwrap())
-    };
 
-    let runner = Runner::new(header);
-    runner.forget();
+        if rand::random() {
+            let header = crate::bouncing::BouncingHeader::new(GL_CONTEXT.as_ref().unwrap());
+            let runner = Runner::new(header);
+            runner.forget();
+        } else {
+            let header = Header::new(GL_CONTEXT.as_ref().unwrap());
+            let runner = Runner::new(header);
+            runner.forget();
+        }
+    }
 
     Some(())
 }
@@ -151,7 +157,7 @@ struct Header<'ctx> {
     logo: Logo<'ctx>,
     width: f32,
     height: f32,
-    frame_buffer: GlFramebuffer<'ctx>,
+    frame_buffer: GlFrameBuffer<'ctx>,
 }
 
 impl<'ctx> Header<'ctx> {
@@ -162,7 +168,7 @@ impl<'ctx> Header<'ctx> {
         let width = gl.canvas().client_width() as f32;
         let height = gl.canvas().client_height() as f32;
 
-        let frame_buffer = GlFramebuffer::new(gl, buffer_width as u32, buffer_height as u32);
+        let frame_buffer = GlFrameBuffer::new(gl, buffer_width as u32, buffer_height as u32);
 
         gl.viewport(0, 0, buffer_width as i32, buffer_height as i32);
         gl.color_mask(true, true, true, true);
@@ -506,10 +512,10 @@ impl<'ctx> MouseCircle<'ctx> {
     }
 }
 
-struct Logo<'ctx> {
-    quad_model: GlModel<'ctx, QuadVertex>,
-    quad_program: GlProgram<'ctx>,
-    logo_model: GlModel<'ctx, SimpleVertex>,
+pub struct Logo<'ctx> {
+    pub quad_model: GlModel<'ctx, QuadVertex>,
+    pub quad_program: GlProgram<'ctx>,
+    pub logo_model: GlModel<'ctx, SimpleVertex>,
     logo_program: GlProgram<'ctx>,
     width: f32,
     height: f32,
@@ -517,7 +523,7 @@ struct Logo<'ctx> {
 }
 
 impl<'ctx> Logo<'ctx> {
-    fn new(gl: &'ctx GlContext, width: f32, height: f32) -> Logo {
+    pub fn new(gl: &'ctx GlContext, width: f32, height: f32) -> Logo {
         let quad_model = GlModel::new(gl, QuadVertex::model());
         let quad_program = GlProgram::with_shader::<QuadShader>(gl);
 
@@ -535,7 +541,7 @@ impl<'ctx> Logo<'ctx> {
         }
     }
 
-    fn matrix(&self) -> [f32; 9] {
+    pub fn matrix(&self) -> [f32; 9] {
         let ratio = self.height / self.width;
         let scale = if ratio > 0.15 { 0.75 } else { ratio * 5.0 };
         let offset = (ratio * ratio) * 0.8;
@@ -552,7 +558,7 @@ impl<'ctx> Logo<'ctx> {
         ]
     }
 
-    fn tick(&mut self, mouse_pos: Option<(f32, f32)>) {
+    pub fn tick(&mut self, mouse_pos: Option<(f32, f32)>) {
         if let Some(mouse) = mouse_pos {
             let mouse = (
                 mouse.0 / self.width * 2.0 - 1.0,
@@ -568,18 +574,18 @@ impl<'ctx> Logo<'ctx> {
         }
     }
 
-    fn resize(&mut self, width: f32, height: f32) {
+    pub fn resize(&mut self, width: f32, height: f32) {
         self.width = width;
         self.height = height;
     }
 
-    fn draw(&mut self, view_matrix: [f32; 9], circle_tex: &GlTexture) {
+    pub fn draw(&mut self, view_matrix: [f32; 9], circle_tex: &GlTexture) {
         let mut uniforms = GlUniformCollection::new();
         uniforms
             .add("u_view_matrix", &view_matrix)
             .add("u_tex_sampler", circle_tex);
 
-        self.quad_program.draw(&self.quad_model, &uniforms);
+        self.quad_program.draw(&self.quad_model, &uniforms, None);
 
         let matrix = self.matrix();
         let mut uniforms = GlUniformCollection::new();
@@ -589,7 +595,7 @@ impl<'ctx> Logo<'ctx> {
             .add("u_frame_sampler", circle_tex)
             .add("u_alpha", &1.0);
 
-        self.logo_program.draw(&self.logo_model, &uniforms);
+        self.logo_program.draw(&self.logo_model, &uniforms, None);
     }
 }
 
@@ -613,7 +619,7 @@ impl AsGlVertex for CircleVertex {
     }
 }
 
-struct QuadVertex {
+pub struct QuadVertex {
     position: (f32, f32),
     uv: (f32, f32),
 }
@@ -658,7 +664,7 @@ impl QuadVertex {
     }
 }
 
-struct SimpleVertex {
+pub struct SimpleVertex {
     position: (f32, f32),
 }
 

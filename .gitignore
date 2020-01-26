@@ -1,4 +1,5 @@
-/dist
+dist
+public/css/bundle.css
 config.toml
-/target
+target
 **/*.rs.bk

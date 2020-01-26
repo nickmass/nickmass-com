@@ -31,7 +31,6 @@ args = ["build", "--release"]
 script_runner = "@shell"
 script = [
 '''
-rm ./public/css/bundle.css
 cat ./public/css/normalize.css ./public/css/skeleton.css ./public/css/site.css > ./public/css/bundle.css
 '''
 ]

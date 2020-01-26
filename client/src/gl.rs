@@ -81,7 +81,7 @@ pub struct GlProgram<'ctx> {
     fragment_shader: WebGlShader,
     texture_unit: Cell<u32>,
     vao_ext: OesVertexArrayObject,
-    vao_map: HashMap<(u64, TypeId, TypeId), WebGlVertexArrayObject>,
+    vao_map: HashMap<u64, WebGlVertexArrayObject>,
     uniform_map: HashMap<&'static str, Option<WebGlUniformLocation>>,
 }
 
@@ -146,13 +146,17 @@ impl<'ctx> GlProgram<'ctx> {
         }
     }
 
-    pub fn draw<V>(&mut self, model: &GlModel<V>, uniforms: &GlUniformCollection)
-    where
+    pub fn draw<V>(
+        &mut self,
+        model: &GlModel<V>,
+        uniforms: &GlUniformCollection,
+        indices: Option<&GlIndexBuffer>,
+    ) where
         V: AsGlVertex,
     {
         self.gl.use_program(Some(&self.program));
 
-        let key = (model.id, TypeId::of::<V>(), TypeId::of::<()>());
+        let key = model.id;
         if let Some(vao) = self.vao_map.get(&key) {
             self.vao_ext
                 .bind_vertex_array_oes(Some(vao))
@@ -169,7 +173,7 @@ impl<'ctx> GlProgram<'ctx> {
         }
 
         self.bind_uniforms(uniforms);
-        model.draw();
+        model.draw(indices);
 
         self.vao_ext
             .bind_vertex_array_oes(None)
@@ -188,7 +192,7 @@ impl<'ctx> GlProgram<'ctx> {
     {
         self.gl.use_program(Some(&self.program));
 
-        let key = (model.id, TypeId::of::<V>(), TypeId::of::<I>());
+        let key = model.id;
         if let Some(vao) = self.vao_map.get(&key) {
             self.vao_ext
                 .bind_vertex_array_oes(Some(vao))
@@ -266,6 +270,12 @@ impl<'a> GlUniformCollection<'a> {
         }
     }
 
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            uniforms: HashMap::with_capacity(capacity),
+        }
+    }
+
     pub fn add(&mut self, name: &'static str, uniform: &'a dyn AsGlUniform) -> &mut Self {
         self.uniforms.insert(name, uniform);
 
@@ -275,6 +285,12 @@ impl<'a> GlUniformCollection<'a> {
 
 pub trait AsGlUniform {
     fn bind(&self, gl: &GL, program: &GlProgram, location: Option<&WebGlUniformLocation>);
+}
+
+impl AsGlUniform for bool {
+    fn bind(&self, gl: &GL, _program: &GlProgram, location: Option<&WebGlUniformLocation>) {
+        gl.uniform1f(location, if *self { 1.0 } else { 0.0 });
+    }
 }
 
 impl AsGlUniform for f32 {
@@ -307,6 +323,12 @@ impl AsGlUniform for [f32; 9] {
     }
 }
 
+impl AsGlUniform for Vec<f32> {
+    fn bind(&self, gl: &GL, _program: &GlProgram, location: Option<&WebGlUniformLocation>) {
+        gl.uniform1fv_with_f32_array(location, &self[..]);
+    }
+}
+
 impl<'ctx> AsGlUniform for GlTexture<'ctx> {
     fn bind(&self, gl: &GL, program: &GlProgram, location: Option<&WebGlUniformLocation>) {
         let texture_unit = program.next_texture_unit();
@@ -320,6 +342,7 @@ impl<'ctx> AsGlUniform for GlTexture<'ctx> {
 pub struct GlModel<'ctx, V: AsGlVertex> {
     gl: &'ctx GlContext,
     id: u64,
+    data: Vec<u8>,
     buffer: WebGlBuffer,
     instanced_buffer: WebGlBuffer,
     poly_type: u32,
@@ -329,20 +352,19 @@ pub struct GlModel<'ctx, V: AsGlVertex> {
 }
 
 impl<'ctx, V: AsGlVertex> GlModel<'ctx, V> {
-    pub fn new(gl: &'ctx GlContext, vertexes: impl IntoIterator<Item = V>) -> GlModel<'ctx, V> {
+    pub fn new(
+        gl: &'ctx GlContext,
+        vertexes: impl IntoIterator<Item = V, IntoIter = impl ExactSizeIterator<Item = V>>,
+    ) -> GlModel<'ctx, V> {
+        let mut model = Self::empty(gl);
+        model.fill(vertexes);
+        model
+    }
+
+    pub fn empty(gl: &'ctx GlContext) -> GlModel<'ctx, V> {
         let buffer = gl.create_buffer().expect("Gl Buffer");
-        gl.bind_buffer(GL::ARRAY_BUFFER, Some(&buffer));
-        let mut data = Vec::new();
 
-        let mut count = 0;
-        for v in vertexes {
-            v.write(&mut data);
-            count += 1;
-        }
-
-        gl.buffer_data_with_u8_array(GL::ARRAY_BUFFER, data.as_slice(), GL::STATIC_DRAW);
-
-        let (poly_type, poly_count) = (V::POLY_TYPE, count);
+        let (poly_type, poly_count) = (V::POLY_TYPE, 0);
 
         let instanced_buffer = gl.create_buffer().expect("Gl Instance Buffer");
 
@@ -351,6 +373,7 @@ impl<'ctx, V: AsGlVertex> GlModel<'ctx, V> {
         GlModel {
             gl,
             id: rand::random(),
+            data: Vec::new(),
             buffer,
             poly_type,
             poly_count,
@@ -358,6 +381,29 @@ impl<'ctx, V: AsGlVertex> GlModel<'ctx, V> {
             instanced_ext,
             _marker: Default::default(),
         }
+    }
+
+    pub fn fill<A: std::borrow::Borrow<V>>(
+        &mut self,
+        vertexes: impl IntoIterator<Item = A, IntoIter = impl ExactSizeIterator<Item = A>>,
+    ) {
+        self.data.clear();
+        self.gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.buffer));
+
+        let vertexes = vertexes.into_iter();
+        self.poly_count = vertexes.len() as i32;
+
+        let data_size = vertexes.len() * V::SIZE;
+        if data_size > self.data.capacity() {
+            self.data.reserve(data_size - self.data.capacity());
+        }
+
+        for v in vertexes {
+            v.borrow().write(&mut self.data);
+        }
+
+        self.gl
+            .buffer_data_with_u8_array(GL::ARRAY_BUFFER, self.data.as_slice(), GL::DYNAMIC_DRAW);
     }
 
     fn fill_vao(&self, program: &GlProgram) {
@@ -394,8 +440,18 @@ impl<'ctx, V: AsGlVertex> GlModel<'ctx, V> {
         }
     }
 
-    fn draw(&self) {
-        self.gl.draw_arrays(self.poly_type, 0, self.poly_count);
+    fn draw(&self, indices: Option<&GlIndexBuffer>) {
+        if let Some(indices) = indices {
+            indices.bind();
+            self.gl.draw_elements_with_i32(
+                self.poly_type,
+                indices.length as i32,
+                GL::UNSIGNED_SHORT,
+                0,
+            );
+        } else {
+            self.gl.draw_arrays(self.poly_type, 0, self.poly_count);
+        }
     }
 
     fn draw_instanced<I: AsGlVertex>(
@@ -428,7 +484,51 @@ impl<'ctx, V: AsGlVertex> Drop for GlModel<'ctx, V> {
     }
 }
 
-pub trait AsGlVertex: Any {
+pub struct GlIndexBuffer<'ctx> {
+    gl: &'ctx GlContext,
+    buffer: WebGlBuffer,
+    length: usize,
+}
+
+impl<'ctx> GlIndexBuffer<'ctx> {
+    pub fn empty(gl: &'ctx GlContext) -> Self {
+        let buffer = gl.create_buffer().expect("Create Index Buffer");
+
+        Self {
+            gl,
+            buffer,
+            length: 0,
+        }
+    }
+
+    fn bind(&self) {
+        self.gl
+            .bind_buffer(GL::ELEMENT_ARRAY_BUFFER, Some(&self.buffer));
+    }
+
+    pub fn fill(&mut self, indices: &[u16]) {
+        self.bind();
+
+        unsafe {
+            let bytes = js_sys::Uint16Array::view(indices);
+            self.gl.buffer_data_with_array_buffer_view(
+                GL::ELEMENT_ARRAY_BUFFER,
+                &bytes,
+                GL::DYNAMIC_DRAW,
+            );
+        }
+
+        self.length = indices.len();
+    }
+}
+
+impl<'ctx> Drop for GlIndexBuffer<'ctx> {
+    fn drop(&mut self) {
+        self.gl.delete_buffer(Some(&self.buffer));
+    }
+}
+
+pub trait AsGlVertex {
     const ATTRIBUTES: &'static [(&'static str, GlValueType)];
     const POLY_TYPE: u32;
     const SIZE: usize;
@@ -601,7 +701,7 @@ impl<'ctx> Drop for GlTexture<'ctx> {
     }
 }
 
-pub struct GlFramebuffer<'ctx> {
+pub struct GlFrameBuffer<'ctx> {
     gl: &'ctx GlContext,
     texture: GlTexture<'ctx>,
     frame_buffer: WebGlFramebuffer,
@@ -609,8 +709,8 @@ pub struct GlFramebuffer<'ctx> {
     height: u32,
 }
 
-impl<'ctx> GlFramebuffer<'ctx> {
-    pub fn new(gl: &'ctx GlContext, width: u32, height: u32) -> GlFramebuffer<'ctx> {
+impl<'ctx> GlFrameBuffer<'ctx> {
+    pub fn new(gl: &'ctx GlContext, width: u32, height: u32) -> GlFrameBuffer<'ctx> {
         let texture = GlTexture::new(gl, width, height);
         let frame_buffer = gl.create_framebuffer().expect("Create FrameBuffer");
         gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&frame_buffer));
@@ -623,7 +723,7 @@ impl<'ctx> GlFramebuffer<'ctx> {
         );
         gl.bind_framebuffer(GL::FRAMEBUFFER, None);
 
-        GlFramebuffer {
+        Self {
             frame_buffer,
             texture,
             width,
@@ -648,7 +748,7 @@ impl<'ctx> GlFramebuffer<'ctx> {
     }
 }
 
-impl<'ctx> Drop for GlFramebuffer<'ctx> {
+impl<'ctx> Drop for GlFrameBuffer<'ctx> {
     fn drop(&mut self) {
         self.gl.delete_framebuffer(Some(&self.frame_buffer));
     }

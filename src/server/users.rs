@@ -1,5 +1,4 @@
-use futures::{future, Future};
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 use super::db::Connection;
 use super::error::Resource;
@@ -51,32 +50,26 @@ impl UserClient {
         UserClient { db }
     }
 
-    pub fn get(&self, id: u64) -> impl Future<Item = User, Error = Error> {
-        Self::get_by_id(self.db.clone(), id)
+    pub async fn get(&mut self, id: u64) -> Result<User, Error> {
+        Self::get_by_id(&mut self.db, id).await
     }
 
-    pub fn get_social_user(
-        &self,
-        social_id: impl AsRef<str>,
-    ) -> impl Future<Item = User, Error = Error> {
-        redis::cmd("get")
-            .arg(format!("socialUser:{}", social_id.as_ref()))
-            .query_async(self.db.clone())
-            .from_err::<Error>()
-            .and_then(|(conn, user_id)| Self::get_by_id(conn, user_id))
+    pub async fn get_social_user(&mut self, social_id: impl AsRef<str>) -> Result<User, Error> {
+        let social_user_key = format!("socialUser:{}", social_id.as_ref());
+        let user_id = redis::cmd("get")
+            .arg(social_user_key)
+            .query_async(&mut self.db)
+            .await?;
+        Self::get_by_id(&mut self.db, user_id).await
     }
 
-    fn get_by_id(conn: Connection, id: u64) -> impl Future<Item = User, Error = Error> {
-        redis::cmd("hgetall")
-            .arg(format!("user:{}", id))
+    async fn get_by_id(conn: &mut Connection, id: u64) -> Result<User, Error> {
+        let user_key = format!("user:{}", id);
+        let user: MaybeUser = redis::cmd("hgetall")
+            .arg(user_key)
             .query_async(conn)
-            .from_err::<Error>()
-            .and_then(move |(_conn, user): (_, MaybeUser)| {
-                if let Some(user) = Option::<User>::from(user) {
-                    future::ok(user)
-                } else {
-                    future::err(Error::ResourceNotFound(Resource::User(id)))
-                }
-            })
+            .await?;
+        let user = Option::<User>::from(user);
+        user.ok_or(Error::ResourceNotFound(Resource::User(id)))
     }
 }

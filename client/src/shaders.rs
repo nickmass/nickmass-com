@@ -28,3 +28,6 @@ shader!(QuadShader, "quad");
 shader!(NoiseShader, "noise");
 shader!(LogoShader, "logo");
 shader!(CircleShader, "circle");
+shader!(BouncingShader, "bouncing");
+shader!(BlurShader, "blur");
+shader!(BallShader, "ball");

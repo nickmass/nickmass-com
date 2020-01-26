@@ -2,6 +2,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{Document, EventTarget};
 
+mod bouncing;
 mod gl;
 mod header;
 mod shaders;
