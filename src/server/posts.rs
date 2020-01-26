@@ -210,7 +210,7 @@ impl Authenticated<PostClient> {
 
     pub async fn update(mut self, id: u64, post: Post) -> Result<u64, Error> {
         let post_key = format!("post:{}", id);
-        let exists: bool = redis::cmd("hexists")
+        let exists: bool = redis::cmd("exists")
             .arg(post_key.clone())
             .query_async(&mut self.db)
             .await?;

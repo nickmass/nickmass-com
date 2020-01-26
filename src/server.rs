@@ -205,7 +205,6 @@ pub async fn run(config: Config) {
         });
 
     let posts_put = warp::put()
-        .and(posts_index)
         .and(posts_id)
         .and(json_body)
         .and(auth.clone())
@@ -222,7 +221,6 @@ pub async fn run(config: Config) {
         });
 
     let posts_delete = warp::delete()
-        .and(posts_index)
         .and(posts_id)
         .and(auth.clone())
         .and(db.clone())

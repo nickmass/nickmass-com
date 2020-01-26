@@ -28,6 +28,8 @@ features = [
 "Element",
 "HtmlElement",
 "HtmlCanvasElement",
+"HtmlCollection",
+"Node",
 "WebGlRenderingContext",
 "WebGlBuffer",
 "WebGlProgram",

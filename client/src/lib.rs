@@ -6,6 +6,7 @@ mod bouncing;
 mod gl;
 mod header;
 mod shaders;
+mod youtube;
 
 #[wasm_bindgen(start)]
 pub fn main() -> Result<(), JsValue> {
@@ -37,6 +38,7 @@ pub fn main() -> Result<(), JsValue> {
 }
 
 fn run(document: &Document) {
+    youtube::YoutubeEmbed::attach(document);
     header::create_header(document);
 }
 
