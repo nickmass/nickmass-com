@@ -3,11 +3,14 @@ use js_sys::Error;
 use wasm_bindgen::JsValue;
 use web_sys::{Document, Element, Event};
 
-pub struct YoutubeEmbed;
+pub struct YoutubeEmbed {
+    listeners: Vec<EventListener>,
+}
 
 impl YoutubeEmbed {
-    pub fn attach(document: &Document) {
+    pub fn attach(document: &Document) -> Self {
         let targets = document.get_elements_by_class_name("youtube-link");
+        let mut listeners = Vec::new();
         for idx in 0..targets.length() {
             if let Some(target) = targets.item(idx) {
                 let options = EventListenerOptions::enable_prevent_default();
@@ -21,8 +24,16 @@ impl YoutubeEmbed {
                         }
                     });
 
-                listener.forget();
+                listeners.push(listener);
             }
+        }
+
+        Self { listeners }
+    }
+
+    pub fn forget(self) {
+        for l in self.listeners {
+            l.forget();
         }
     }
 }

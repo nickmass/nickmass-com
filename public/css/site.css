@@ -93,6 +93,11 @@ code,kbd,pre,samp {
     vertical-align: middle;
 }
 
+#header .social-logo {
+    width: 18px;
+    height: 18px;
+}
+
 @media (min-width: 550px) {
     #header .social-links > li {
         display: inline-block;

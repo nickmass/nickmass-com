@@ -69,7 +69,7 @@ fn cmark_ext_map<'a>(item: Event) -> Event {
                         let embed = format!(
                             r#"
 <div class="youtube-container">
-    <a class="youtube-link" href="https://www.youtube.com/watch?v={video_id}" target="_blank" data-video-id="{video_id}">
+    <a class="youtube-link" href="https://www.youtube.com/watch?v={video_id}" target="_blank" rel="noopener noreferrer" data-video-id="{video_id}">
         <img src="https://img.youtube.com/vi/{video_id}/hqdefault.jpg" alt="YouTube embedded video">
         <div class="youtube-play-button"></div>
     </a>

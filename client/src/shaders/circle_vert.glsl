@@ -1,5 +1,3 @@
-precision highp float;
-
 attribute mat3 a_model_matrix;
 attribute vec2 a_position;
 attribute float a_alpha;

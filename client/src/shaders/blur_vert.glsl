@@ -1,5 +1,3 @@
-precision highp float;
-
 attribute vec2 a_position;
 
 uniform mat3 u_view_matrix;

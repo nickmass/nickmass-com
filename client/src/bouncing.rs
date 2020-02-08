@@ -237,7 +237,7 @@ impl StrokeVertexConstructor<Vertex> for StrokeVertexCtor {
         Vertex {
             position: point.into(),
             normal: attributes.normal().into(),
-            line_width: 2.0,
+            line_width: 3.5,
             alpha: self.0,
         }
     }
@@ -326,6 +326,8 @@ impl SiteHeader for BouncingHeader<'static> {
         let mut line_uniforms = GlUniformCollection::new();
         line_uniforms.add("u_view_matrix", &matrix);
 
+        self.gl.enable(GL::BLEND);
+        self.gl.blend_func(GL::SRC_ALPHA, GL::ONE_MINUS_SRC_ALPHA);
         self.program
             .draw(&self.model, &line_uniforms, Some(&self.index_buffer));
 
@@ -339,6 +341,7 @@ impl SiteHeader for BouncingHeader<'static> {
 
         self.ball_program
             .draw_instanced(&self.circle_model, ball_instances, &ball_uniforms);
+        self.gl.disable(GL::BLEND);
 
         let view_matrix = [
             1.0,
@@ -470,7 +473,7 @@ impl Ball {
         let dir = rand::random::<f32>() * 2.0 * 3.14159;
         let location = bounds.to_bounds_space((rand::random::<Vector2d<f32>>() * 0.9) + 0.05);
 
-        let radius = 5.0;
+        let radius = 6.0;
         let speed = (rand::random::<f32>() * 1.2) + 0.2;
 
         Self {
@@ -556,15 +559,20 @@ impl AsGlVertex for BallInstance {
 #[derive(Clone, Debug)]
 struct BallVertex {
     position: Vector2d<f32>,
+    offset: f32,
 }
 
 impl AsGlVertex for BallVertex {
-    const ATTRIBUTES: &'static [(&'static str, GlValueType)] = &[("a_position", GlValueType::Vec2)];
+    const ATTRIBUTES: &'static [(&'static str, GlValueType)] = &[
+        ("a_position", GlValueType::Vec2),
+        ("a_offset", GlValueType::Float),
+    ];
     const POLY_TYPE: u32 = GL::TRIANGLE_FAN;
-    const SIZE: usize = 8;
+    const SIZE: usize = 12;
     fn write(&self, mut buf: impl std::io::Write) {
         let _ = buf.write_f32::<LittleEndian>(self.position.x);
         let _ = buf.write_f32::<LittleEndian>(self.position.y);
+        let _ = buf.write_f32::<LittleEndian>(self.offset);
     }
 }
 
@@ -576,11 +584,13 @@ fn circle_model(tris: u32) -> Vec<BallVertex> {
 
     v.push(BallVertex {
         position: Vector2d::new(0.0, 0.0),
+        offset: 0.0,
     });
 
     for _ in 0..(tris - 1) {
         v.push(BallVertex {
             position: Vector2d::new(count.sin(), count.cos()),
+            offset: 1.0,
         });
         count += inc;
     }

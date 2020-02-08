@@ -1,4 +1,4 @@
-precision highp float;
+precision mediump float;
 
 uniform vec2 u_dimensions;
 const int length = 49;

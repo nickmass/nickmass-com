@@ -38,7 +38,8 @@ pub fn main() -> Result<(), JsValue> {
 }
 
 fn run(document: &Document) {
-    youtube::YoutubeEmbed::attach(document);
+    let embeds = youtube::YoutubeEmbed::attach(document);
+    embeds.forget();
     header::create_header(document);
 }
 

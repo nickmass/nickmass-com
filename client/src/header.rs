@@ -469,7 +469,7 @@ impl<'ctx> MouseCircle<'ctx> {
 
             self.circle.radius = 0.1;
             self.pos_x = pos.0;
-            self.pos_y = pos.1;
+            self.pos_y = self.height - pos.1;
             let offset = (self.width - self.height) / 2.0;
             self.in_bounds = true;
             self.circle.set_center(
