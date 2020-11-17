@@ -1,3 +1,4 @@
+use ring::aead::BoundKey;
 use ring::{aead, rand};
 
 use super::db::Connection;
@@ -9,16 +10,44 @@ use std::sync::{Arc, Mutex};
 pub struct Session {
     db: Connection,
     rand: rand::SystemRandom,
-    sealing_key: aead::SealingKey,
-    opening_key: aead::OpeningKey,
+    sealing_key: aead::SealingKey<CountingNonce>,
+    opening_key: aead::OpeningKey<CountingNonce>,
+}
+
+struct CountingNonce {
+    val: u64,
+}
+
+impl CountingNonce {
+    fn new() -> Self {
+        CountingNonce { val: 0 }
+    }
+}
+
+impl aead::NonceSequence for CountingNonce {
+    fn advance(&mut self) -> Result<aead::Nonce, ring::error::Unspecified> {
+        if self.val == std::u64::MAX {
+            Err(ring::error::Unspecified)
+        } else {
+            self.val += 1;
+            let bytes = self.val.to_ne_bytes();
+            let bytes = [
+                0, 0, 0, 0, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
+                bytes[7],
+            ];
+            Ok(aead::Nonce::assume_unique_for_key(bytes))
+        }
+    }
 }
 
 impl Session {
     pub fn new(db: Connection, session_key: impl AsRef<[u8]>) -> Session {
-        let sealing_key = aead::SealingKey::new(&aead::AES_256_GCM, session_key.as_ref())
+        let sealing_key = aead::UnboundKey::new(&aead::AES_256_GCM, session_key.as_ref())
             .expect("Valid session key");
-        let opening_key = aead::OpeningKey::new(&aead::AES_256_GCM, session_key.as_ref())
+        let sealing_key = aead::SealingKey::new(sealing_key, CountingNonce::new());
+        let opening_key = aead::UnboundKey::new(&aead::AES_256_GCM, session_key.as_ref())
             .expect("Valid session key");
+        let opening_key = aead::OpeningKey::new(opening_key, CountingNonce::new());
         Session {
             db,
             rand: rand::SystemRandom::new(),
@@ -57,19 +86,13 @@ impl Session {
         let _: Result<(), _> = pipe.query_async(&mut self.db).await;
     }
 
-    fn decode_sid(&self, addr: IpAddr, sid: impl AsRef<str>) -> Option<String> {
+    fn decode_sid(&mut self, addr: IpAddr, sid: impl AsRef<str>) -> Option<String> {
         let mut sid_bytes = base64::decode(sid.as_ref()).ok()?;
 
-        let nonce = aead::Nonce::try_assume_unique_for_key(&sid_bytes[0..12]).ok()?;
-
-        let sid_bytes = aead::open_in_place(
-            &self.opening_key,
-            nonce,
-            aead::Aad::empty(),
-            12,
-            &mut sid_bytes,
-        )
-        .ok()?;
+        let sid_bytes = self
+            .opening_key
+            .open_in_place(aead::Aad::empty(), &mut sid_bytes)
+            .ok()?;
         let sid_string = String::from_utf8(sid_bytes.to_vec()).ok()?;
         let mut parts = sid_string.splitn(2, '.');
         let user_key = parts.next()?;
@@ -100,31 +123,14 @@ impl Session {
         base64::encode(&nonce_bytes[..])
     }
 
-    fn create_sid(&self, user_key: impl AsRef<str>, addr: IpAddr) -> String {
-        use ring::rand::SecureRandom;
+    fn create_sid(&mut self, user_key: impl AsRef<str>, addr: IpAddr) -> String {
         let mut sid: Vec<u8> = format!("{}.{}", user_key.as_ref(), addr).as_bytes().into();
-        let mut nonce_bytes = [0; 12];
-        self.rand
-            .fill(&mut nonce_bytes)
-            .expect("Crypto error, could not fill session nonce random");
-        let nonce = aead::Nonce::try_assume_unique_for_key(&nonce_bytes[..])
-            .expect("Crypto error, incorrect nonce length");
 
-        let suffix_len = self.sealing_key.algorithm().tag_len();
-        sid.resize(sid.len() + suffix_len, 0);
+        self.sealing_key
+            .seal_in_place_append_tag(aead::Aad::empty(), &mut sid)
+            .expect("Crypto error, failed to encrypt");
 
-        let out_len = aead::seal_in_place(
-            &self.sealing_key,
-            nonce,
-            aead::Aad::empty(),
-            &mut sid,
-            suffix_len,
-        )
-        .expect("Crypto error, failed to encrypt");
-
-        let mut sid_bytes = Vec::from(&nonce_bytes[..]);
-        sid_bytes.extend_from_slice(&sid[..out_len]);
-        base64::encode(&sid_bytes)
+        base64::encode(&sid)
     }
 }
 

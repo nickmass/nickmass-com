@@ -167,31 +167,27 @@ impl Config {
             _ => (),
         }
 
-        let settings = if settings.config_file.is_file() {
-            let mut config_file = String::new();
-            let mut f = File::open(&settings.config_file).unwrap_or_else(|e| {
+        let mut config_file = String::new();
+        let mut f = File::open(&settings.config_file).unwrap_or_else(|e| {
+            config_err(
+                format!("Unable to open config file: {:?}", e),
+                clap::ErrorKind::Io,
+            )
+        });
+        f.read_to_string(&mut config_file).unwrap_or_else(|e| {
+            config_err(
+                format!("Unable to read config file: {:?}", e),
+                clap::ErrorKind::Io,
+            )
+        });
+        let config_file_settings: ConfigBuilder =
+            toml::from_str(&config_file).unwrap_or_else(|e| {
                 config_err(
-                    format!("Unable to open config file: {:?}", e),
+                    format!("Unable to load config file: {:?}", e),
                     clap::ErrorKind::Io,
                 )
             });
-            f.read_to_string(&mut config_file).unwrap_or_else(|e| {
-                config_err(
-                    format!("Unable to read config file: {:?}", e),
-                    clap::ErrorKind::Io,
-                )
-            });
-            let config_file_settings: ConfigBuilder =
-                toml::from_str(&config_file).unwrap_or_else(|e| {
-                    config_err(
-                        format!("Unable to load config file: {:?}", e),
-                        clap::ErrorKind::Io,
-                    )
-                });
-            settings.merge(config_file_settings)
-        } else {
-            settings
-        };
+        let settings = settings.merge(config_file_settings);
 
         settings.build().unwrap_or_else(|e| {
             config_err(

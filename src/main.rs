@@ -1,11 +1,13 @@
 #![recursion_limit = "128"]
 #![type_length_limit = "2022793"]
 
+use log::info;
+use tokio::runtime::Runtime;
+
 mod server;
 use server::Config;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let config = Config::load();
     let mut builder = env_logger::Builder::new();
     match (config.verbosity, config.silent) {
@@ -18,5 +20,9 @@ async fn main() {
         _ => builder.filter(None, log::LevelFilter::Trace),
     };
     builder.write_style(env_logger::WriteStyle::Auto).init();
-    server::run(config).await;
+
+    info!("Config loaded");
+
+    let mut rt = Runtime::new().unwrap();
+    rt.block_on(server::run(config));
 }

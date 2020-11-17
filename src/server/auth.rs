@@ -35,12 +35,10 @@ pub struct GoogleToken {
 impl GoogleToken {
     fn deser<'d, D: serde::Deserializer<'d>>(de: D) -> Result<GoogleToken, D::Error> {
         let base64 = String::deserialize(de)?;
-        let token = jwt::Token::parse(base64.as_str())
+        let token = jwt::Token::parse_unverified(base64.as_str())
             .map_err(|e| serde::de::Error::custom(format!("{:?}", e)))?;
-        Ok(GoogleToken {
-            header: token.header,
-            claims: token.claims,
-        })
+        let (header, claims) = token.into();
+        Ok(GoogleToken { header, claims })
     }
 }
 
@@ -51,36 +49,12 @@ pub struct GoogleTokenHeader {
     pub typ: String,
 }
 
-impl jwt::Component for GoogleTokenHeader {
-    fn from_base64(raw: &str) -> Result<Self, jwt::Error> {
-        let json = base64::decode(raw).map_err(|_e| jwt::Error::Format)?;
-        serde_json::from_slice(json.as_slice()).map_err(|_e| jwt::Error::Format)
-    }
-
-    fn to_base64(&self) -> Result<String, jwt::Error> {
-        let json = serde_json::to_string(self).map_err(|_e| jwt::Error::Format)?;
-        Ok(base64::encode(&*json))
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GoogleTokenClaims {
     pub iss: String,
     pub sub: String,
     pub email: String,
     pub name: String,
-}
-
-impl jwt::Component for GoogleTokenClaims {
-    fn from_base64(raw: &str) -> Result<Self, jwt::Error> {
-        let json = base64::decode(raw).map_err(|_e| jwt::Error::Format)?;
-        serde_json::from_slice(json.as_slice()).map_err(|_e| jwt::Error::Format)
-    }
-
-    fn to_base64(&self) -> Result<String, jwt::Error> {
-        let json = serde_json::to_string(self).map_err(|_e| jwt::Error::Format)?;
-        Ok(base64::encode(&*json))
-    }
 }
 
 pub struct Authenticated<T> {
