@@ -23,6 +23,6 @@ fn main() {
 
     info!("Config loaded");
 
-    let mut rt = Runtime::new().unwrap();
+    let rt = Runtime::new().unwrap();
     rt.block_on(server::run(config));
 }

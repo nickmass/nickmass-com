@@ -34,21 +34,17 @@ pub async fn run(config: Config) {
 
     let session_store = warp::any()
         .and(session.clone())
-        .and(warp::addr::remote().and_then(|addr| {
-            async move {
-                match addr {
-                    Some(addr) => Ok(addr),
-                    None => Err(reject_with(Error::IpRequired)),
-                }
+        .and(warp::addr::remote().and_then(|addr| async move {
+            match addr {
+                Some(addr) => Ok(addr),
+                None => Err(reject_with(Error::IpRequired)),
             }
         }))
         .and(maybe_cookie("sid"))
         .and_then(
-            |session: Session, ip: std::net::SocketAddr, sid: Option<String>| {
-                async move {
-                    let store = session.get_store(ip.ip(), sid).await;
-                    Ok::<_, Error>(store).map_err(reject_with)
-                }
+            |session: Session, ip: std::net::SocketAddr, sid: Option<String>| async move {
+                let store = session.get_store(ip.ip(), sid).await;
+                Ok::<_, Error>(store).map_err(reject_with)
             },
         );
 
@@ -71,13 +67,11 @@ pub async fn run(config: Config) {
             }
         });
 
-    let auth = maybe_auth.clone().and_then(|user| {
-        async move {
-            if let Some(user) = user {
-                Ok(user)
-            } else {
-                Err(Error::Unauthorized).map_err(reject_with)
-            }
+    let auth = maybe_auth.clone().and_then(|user| async move {
+        if let Some(user) = user {
+            Ok(user)
+        } else {
+            Err(Error::Unauthorized).map_err(reject_with)
         }
     });
 
@@ -93,12 +87,10 @@ pub async fn run(config: Config) {
         .and(warp::path::end())
         .and(maybe_auth.clone())
         .and(db.clone())
-        .and_then(|page, user, conn| {
-            async move {
-                views::index(user, conn, Some(page))
-                    .await
-                    .map_err(reject_with)
-            }
+        .and_then(|page, user, conn| async move {
+            views::index(user, conn, Some(page))
+                .await
+                .map_err(reject_with)
         });
 
     let view_post_id = warp::path("post")
@@ -106,8 +98,8 @@ pub async fn run(config: Config) {
         .and(warp::path::end())
         .and(maybe_auth.clone())
         .and(db.clone())
-        .and_then(|post, user, conn| {
-            async move { views::post_id(user, conn, post).await.map_err(reject_with) }
+        .and_then(|post, user, conn| async move {
+            views::post_id(user, conn, post).await.map_err(reject_with)
         });
 
     let view_post_frag = warp::path("post")
@@ -115,12 +107,10 @@ pub async fn run(config: Config) {
         .and(warp::path::end())
         .and(maybe_auth.clone())
         .and(db.clone())
-        .and_then(|post, user, conn| {
-            async move {
-                views::post_frag(user, conn, post)
-                    .await
-                    .map_err(reject_with)
-            }
+        .and_then(|post, user, conn| async move {
+            views::post_frag(user, conn, post)
+                .await
+                .map_err(reject_with)
         });
 
     let views = view_index
@@ -130,14 +120,7 @@ pub async fn run(config: Config) {
         .unify()
         .or(view_post_frag)
         .unify()
-        .map(warp::reply::html)
-        .map(|reply| {
-            warp::reply::with_header(
-                reply,
-                "link",
-                "</css/bundle.css>; rel=preload; as=style, </js/nickmass_com_client.js>; rel=preload; as=script; crossorigin, </js/nickmass_com_client_bg.wasm>; rel=preload; as=fetch; crossorigin",
-            )
-        });
+        .map(warp::reply::html);
 
     let json_body = warp::body::content_length_limit(1024 * 1024 * 5).and(warp::body::json());
 
@@ -148,44 +131,41 @@ pub async fn run(config: Config) {
         .and(warp::path::param::<String>())
         .and(warp::path::end());
 
-    let posts_get_all = warp::get().and(posts_index).and(db.clone()).and_then(|db| {
-        async move {
+    let posts_get_all = warp::get()
+        .and(posts_index)
+        .and(db.clone())
+        .and_then(|db| async move {
             let client = posts::PostClient::new(db);
             client
                 .get_all(100, 0)
                 .await
                 .map(|posts| warp::reply::json(&posts))
                 .map_err(reject_with)
-        }
-    });
+        });
 
     let posts_get = warp::get()
         .and(posts_id)
         .and(db.clone())
-        .and_then(|id, conn| {
-            async move {
-                let client = posts::PostClient::new(conn);
-                client
-                    .get(id)
-                    .await
-                    .map(|post| warp::reply::json(&post))
-                    .map_err(reject_with)
-            }
+        .and_then(|id, conn| async move {
+            let client = posts::PostClient::new(conn);
+            client
+                .get(id)
+                .await
+                .map(|post| warp::reply::json(&post))
+                .map_err(reject_with)
         });
 
     let posts_get_fragment =
         warp::get()
             .and(posts_frag)
             .and(db.clone())
-            .and_then(|fragment, conn| {
-                async move {
-                    let client = posts::PostClient::new(conn);
-                    client
-                        .get_by_fragment(fragment)
-                        .await
-                        .map(|post| warp::reply::json(&post))
-                        .map_err(reject_with)
-                }
+            .and_then(|fragment, conn| async move {
+                let client = posts::PostClient::new(conn);
+                client
+                    .get_by_fragment(fragment)
+                    .await
+                    .map(|post| warp::reply::json(&post))
+                    .map_err(reject_with)
             });
 
     let posts_post = warp::post()
@@ -193,15 +173,13 @@ pub async fn run(config: Config) {
         .and(json_body)
         .and(auth.clone())
         .and(db.clone())
-        .and_then(|post, user, conn| {
-            async move {
-                let client = auth::Authenticated::new(user, posts::PostClient::new(conn));
-                client
-                    .create(post)
-                    .await
-                    .map(|id| warp::reply::json(&id))
-                    .map_err(reject_with)
-            }
+        .and_then(|post, user, conn| async move {
+            let client = auth::Authenticated::new(user, posts::PostClient::new(conn));
+            client
+                .create(post)
+                .await
+                .map(|id| warp::reply::json(&id))
+                .map_err(reject_with)
         });
 
     let posts_put = warp::put()
@@ -209,30 +187,26 @@ pub async fn run(config: Config) {
         .and(json_body)
         .and(auth.clone())
         .and(db.clone())
-        .and_then(|id, post: posts::Post, user, conn| {
-            async move {
-                let client = auth::Authenticated::new(user, posts::PostClient::new(conn));
-                client
-                    .update(id, post)
-                    .await
-                    .map(|id| warp::reply::json(&id))
-                    .map_err(reject_with)
-            }
+        .and_then(|id, post: posts::Post, user, conn| async move {
+            let client = auth::Authenticated::new(user, posts::PostClient::new(conn));
+            client
+                .update(id, post)
+                .await
+                .map(|id| warp::reply::json(&id))
+                .map_err(reject_with)
         });
 
     let posts_delete = warp::delete()
         .and(posts_id)
         .and(auth.clone())
         .and(db.clone())
-        .and_then(|id, user, conn| {
-            async move {
-                let client = auth::Authenticated::new(user, posts::PostClient::new(conn));
-                client
-                    .delete(id)
-                    .await
-                    .map(|id| warp::reply::json(&id))
-                    .map_err(reject_with)
-            }
+        .and_then(|id, user, conn| async move {
+            let client = auth::Authenticated::new(user, posts::PostClient::new(conn));
+            client
+                .delete(id)
+                .await
+                .map(|id| warp::reply::json(&id))
+                .map_err(reject_with)
         });
 
     let posts_api = posts_get_all
@@ -280,74 +254,78 @@ pub async fn run(config: Config) {
     let google = auth.and(warp::path("google"));
 
     let google_return = google.and(warp::path("return")).and(warp::path::end());
-    let google_oath_return = warp::get()
-        .and(google_return)
-        .and(session.clone())
-        .and(session_store.clone())
-        .and(warp::query::<auth::OauthResponse>())
-        .and(config.clone())
-        .and_then(
-            |session: Session, store: Store, oauth: auth::OauthResponse, config: Arc<Config>| {
-                async move {
-                    let client = reqwest::Client::new();
-                    let redirect_uri = format!("{}auth/google/return", config.base_url);
-                    let nounce = store.get("socialNounce");
+    let google_oath_return =
+        warp::get()
+            .and(google_return)
+            .and(session.clone())
+            .and(session_store.clone())
+            .and(warp::query::<auth::OauthResponse>())
+            .and(config.clone())
+            .and_then(
+                |session: Session,
+                 store: Store,
+                 oauth: auth::OauthResponse,
+                 config: Arc<Config>| {
+                    async move {
+                        let client = reqwest::Client::new();
+                        let redirect_uri = format!("{}auth/google/return", config.base_url);
+                        let nounce = store.get("socialNounce");
 
-                    if Some(oauth.state) != nounce {
-                        return Err(Error::Unauthorized).map_err(reject_with);
-                    } else {
-                        let raw_res = client
-                            .post(&config.oauth_token_url.to_string())
-                            .form(&auth::OauthTokenRequest {
-                                code: &oauth.code,
-                                client_id: &config.oauth_id,
-                                client_secret: &config.oauth_secret,
-                                redirect_uri: redirect_uri.as_str(),
-                                grant_type: "authorization_code",
-                            })
-                            .send()
-                            .await
-                            .map_err(Error::from)
-                            .map_err(reject_with)?;
+                        if Some(oauth.state) != nounce {
+                            return Err(Error::Unauthorized).map_err(reject_with);
+                        } else {
+                            let raw_res = client
+                                .post(&config.oauth_token_url.to_string())
+                                .form(&auth::OauthTokenRequest {
+                                    code: &oauth.code,
+                                    client_id: &config.oauth_id,
+                                    client_secret: &config.oauth_secret,
+                                    redirect_uri: redirect_uri.as_str(),
+                                    grant_type: "authorization_code",
+                                })
+                                .send()
+                                .await
+                                .map_err(Error::from)
+                                .map_err(reject_with)?;
 
-                        let token_res = raw_res
-                            .json::<auth::OauthTokenResponse>()
-                            .await
-                            .map_err(Error::from)
-                            .map_err(reject_with)?;
+                            let token_res = raw_res
+                                .json::<auth::OauthTokenResponse>()
+                                .await
+                                .map_err(Error::from)
+                                .map_err(reject_with)?;
 
-                        store.set(
-                            "socialUser",
-                            format!("google:{}", token_res.id_token.claims.sub),
-                        );
-                        let sid = store.sid();
-                        session.set_store(store).await;
+                            store.set(
+                                "socialUser",
+                                format!("google:{}", token_res.id_token.claims.sub),
+                            );
+                            let sid = store.sid();
+                            session.set_store(store).await;
 
-                        let reply = warp::reply::with_header(
-                            warp::http::StatusCode::TEMPORARY_REDIRECT,
-                            warp::http::header::LOCATION,
-                            config.base_url.to_string(),
-                        );
-                        let reply = warp::reply::with_header(
-                            reply,
-                            warp::http::header::SET_COOKIE,
-                            format!(
-                                "sid={}; Max-Age={}; Path=/; SameSite=Lax; HttpOnly",
-                                sid,
-                                60 * 60 * 24 * 30
-                            ),
-                        );
-                        let reply = warp::reply::with_header(
-                            reply,
-                            warp::http::header::CACHE_CONTROL,
-                            "no-cache, no-store, must-revalidate",
-                        );
+                            let reply = warp::reply::with_header(
+                                warp::http::StatusCode::TEMPORARY_REDIRECT,
+                                warp::http::header::LOCATION,
+                                config.base_url.to_string(),
+                            );
+                            let reply = warp::reply::with_header(
+                                reply,
+                                warp::http::header::SET_COOKIE,
+                                format!(
+                                    "sid={}; Max-Age={}; Path=/; SameSite=Lax; HttpOnly",
+                                    sid,
+                                    60 * 60 * 24 * 30
+                                ),
+                            );
+                            let reply = warp::reply::with_header(
+                                reply,
+                                warp::http::header::CACHE_CONTROL,
+                                "no-cache, no-store, must-revalidate",
+                            );
 
-                        Ok(reply)
+                            Ok(reply)
+                        }
                     }
-                }
-            },
-        );
+                },
+            );
 
     let google_login = warp::get()
         .and(google.and(warp::path::end()))
@@ -411,7 +389,7 @@ pub async fn run(config: Config) {
         (server_config.listen_ip, server_config.listen_port).into();
 
     info!("Server starting on {}", socket_addr);
-    let server = warp::serve(
+    let _server = warp::serve(
         api.or(views
             .or(logout)
             .or(google_auth)

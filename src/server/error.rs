@@ -12,7 +12,7 @@ pub enum Error {
     Unauthorized,
     NotFound,
     IpRequired,
-    Timeout(tokio::time::Elapsed),
+    Timeout(tokio::time::error::Elapsed),
 }
 
 impl Reject for Error {}
@@ -48,8 +48,8 @@ impl From<reqwest::Error> for Error {
     }
 }
 
-impl From<tokio::time::Elapsed> for Error {
-    fn from(other: tokio::time::Elapsed) -> Self {
+impl From<tokio::time::error::Elapsed> for Error {
+    fn from(other: tokio::time::error::Elapsed) -> Self {
         Error::Timeout(other)
     }
 }

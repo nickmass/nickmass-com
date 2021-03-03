@@ -1,3 +1,58 @@
+/* source-code-pro-regular - latin */
+@font-face {
+  font-family: 'Source Code Pro';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: local(''),
+       url('/fonts/source-code-pro-v13-latin-regular.woff2') format('woff2'),
+       url('/fonts/source-code-pro-v13-latin-regular.woff') format('woff');
+}
+
+/* josefin-sans-300 - latin */
+@font-face {
+  font-family: 'Josefin Sans';
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: local(''),
+       url('/fonts/josefin-sans-v17-latin-300.woff2') format('woff2'),
+       url('/fonts/josefin-sans-v17-latin-300.woff') format('woff');
+}
+
+/* josefin-sans-regular - latin */
+@font-face {
+  font-family: 'Josefin Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: local(''),
+       url('/fonts/josefin-sans-v17-latin-regular.woff2') format('woff2'),
+       url('/fonts/josefin-sans-v17-latin-regular.woff') format('woff');
+}
+
+/* josefin-sans-700 - latin */
+@font-face {
+  font-family: 'Josefin Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: local(''),
+       url('/fonts/josefin-sans-v17-latin-700.woff2') format('woff2'),
+       url('/fonts/josefin-sans-v17-latin-700.woff') format('woff');
+}
+
+/* josefin-sans-italic - latin */
+@font-face {
+  font-family: 'Josefin Sans';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: local(''),
+       url('/fonts/josefin-sans-v17-latin-italic.woff2') format('woff2'),
+       url('/fonts/josefin-sans-v17-latin-italic.woff') format('woff');
+}
+
 html {
     font-size: 14px;
 }
