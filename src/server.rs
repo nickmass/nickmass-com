@@ -120,7 +120,8 @@ pub async fn run(config: Config) {
         .unify()
         .or(view_post_frag)
         .unify()
-        .map(warp::reply::html);
+        .map(warp::reply::html)
+        .map(|reply| warp::reply::with_header(reply, "Content-Security-Policy", "default-src 'none'; connect-src 'self'; font-src 'self'; frame-src https://www.youtube.com; img-src 'self' https://img.youtube.com; media-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'"));
 
     let json_body = warp::body::content_length_limit(1024 * 1024 * 5).and(warp::body::json());
 

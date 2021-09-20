@@ -1,15 +1,6 @@
 [config]
 skip_core_tasks = true
 
-[tasks.clean-js]
-script_runner = "@shell"
-script = [
-'''
-rm -rf ./public/js
-mkdir ./public/js
-'''
-]
-
 [tasks.install-wasm-pack]
 script_runner = "@shell"
 script = [
@@ -20,8 +11,8 @@ wasm-pack -V || cargo install wasm-pack
 
 [tasks.build-client]
 command = "wasm-pack"
-args = ["build", "--release", "--out-dir", "../public/js", "--target", "web", "./client"]
-dependencies = ["clean-js", "install-wasm-pack"]
+args = ["build", "--release", "--out-dir", "../dist/public/js", "--target", "web", "--no-typescript", "./client"]
+dependencies = ["install-wasm-pack"]
 
 [tasks.build-server]
 command = "cargo"
@@ -31,7 +22,18 @@ args = ["build", "--release"]
 script_runner = "@shell"
 script = [
 '''
-cat ./public/css/normalize.css ./public/css/skeleton.css ./public/css/site.css > ./public/css/bundle.css
+cat ./public/css/normalize.css ./public/css/skeleton.css ./public/css/site.css > ./dist/public/css/bundle.css
+'''
+]
+
+[tasks.clean]
+script_runner = "@shell"
+script = [
+'''
+rm -rf ./dist
+mkdir -p ./dist/public
+mkdir -p ./dist/public/css
+mkdir -p ./dist/public/js
 '''
 ]
 
@@ -39,11 +41,9 @@ cat ./public/css/normalize.css ./public/css/skeleton.css ./public/css/site.css >
 script_runner = "@shell"
 script = [
 '''
-rm -rf ./dist
-mkdir ./dist
 cp ./target/release/nickmass-com ./dist
 cp -r ./public ./dist
 '''
 ]
-dependencies = ["build-client", "build-server", "css"]
+dependencies = ["clean", "build-client", "build-server", "css"]
 

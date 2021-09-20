@@ -7,14 +7,14 @@ edition = "2018"
 [dependencies]
 futures= "0.3.8"
 serde = { version = "1.0", features = ["derive"] }
-warp = "0.3.0"
+warp = "0.3.1"
 redis = { version = "0.20.0", features = ["tokio-comp"] }
 serde_json = "1.0"
 url = "2.2"
-reqwest = { version = "0.11.1", features = ["json"] }
+reqwest = { version = "0.11.1", features = ["json", "rustls-tls"], default-features = false }
 jwt = "0.11.0"
 base64 = "0.13.0"
-ring = "0.16.20"
+ring = "0.16.2"
 env_logger = "0.8.1"
 log = "0.4.11"
 askama = "0.10.5"

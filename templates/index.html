@@ -9,6 +9,7 @@
         <link rel="preload" href="/fonts/josefin-sans-v17-latin-300.woff2" as="font" type="font/woff2" crossorigin>
         <link rel="preload" href="/fonts/josefin-sans-v17-latin-700.woff2" as="font" type="font/woff2" crossorigin>
         <link rel="icon" href="data:,">
+        <script type="module" src="/js/main.js"></script>
         <title>{% block title %}NickMass.com{% endblock %}</title>
     </head>
     <body>
@@ -69,12 +70,5 @@
         <div class="container">
             {% block content %}{% endblock %}
         </div>
-        <script type="module">
-         import { default as init } from '/js/nickmass_com_client.js';
-         async function run() {
-             await init('/js/nickmass_com_client_bg.wasm');
-         }
-         run();
-        </script>
     </body>
 </html>
