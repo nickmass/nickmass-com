@@ -32,7 +32,12 @@ impl Error {
     }
 
     pub fn status_code(&self) -> u16 {
-        500
+        match *self {
+            Error::NotFound => 404,
+            Error::ResourceNotFound(_) => 404,
+            Error::Unauthorized => 401,
+            _ => 500,
+        }
     }
 }
 

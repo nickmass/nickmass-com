@@ -2,8 +2,10 @@
     {%- match user -%}
     {%- when Some with (user) -%}
     <div class="u-pull-right">
-        <a class="button" style="margin-right: 16px" href="/post/{{post.id|e}}/edit">Edit</a>
-        <form style="display: inline;" method="post" action="/post/{{post.id|e}}/delete"><button>Delete</button></form>
+        <form method="post" action="/post/{{post.id|e}}/delete">
+            <a class="button" href="/post/{{post.id|e}}/edit">Edit</a>
+            <button>Delete</button>
+        </form>
     </div>
     {%- when None -%}
     {%- endmatch -%}
@@ -11,7 +13,8 @@
     <small>
         <span itemprop="author">{{post.author.as_ref().map(String::as_str).unwrap_or("Unknown")|e}}</span>
         <span> on </span>
-        <span itemprop="datePublished">{{post.render_date()|e}}</span></small>
+        <span itemprop="datePublished">{{post.render_date()|e}}</span>
+    </small>
     <div itemprop="articleBody">
         {{post.render_content()|safe}}
     </div>

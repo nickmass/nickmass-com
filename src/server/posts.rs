@@ -54,7 +54,7 @@ impl redis::FromRedisValue for MaybePost {
                     .ok_or_else(|| if_error("Unexpected post title"))?;
                 let url_fragment = h
                     .remove("urlFragment")
-                    .ok_or_else(|| if_error("Unexpect post url_fragment"))?;
+                    .ok_or_else(|| if_error("Unexpected post url_fragment"))?;
 
                 Ok(MaybePost(Some(Post {
                     id,
@@ -149,7 +149,12 @@ impl PostClient {
             .arg(fragment_key)
             .query_async(&mut self.db)
             .await?;
-        Self::get_by_id(&mut self.db, id).await
+
+        if let Some(id) = id {
+            Self::get_by_id(&mut self.db, id).await
+        } else {
+            Err(Error::NotFound)
+        }
     }
 
     async fn get_by_id(db: &mut Connection, id: u64) -> Result<Post, Error> {

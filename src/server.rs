@@ -19,6 +19,8 @@ pub use error::Error;
 
 use sessions::{Session, Store};
 
+const CSP_DIRECTIVE: &'static str = "default-src 'none'; connect-src 'self'; font-src 'self'; frame-src https://www.youtube.com; img-src 'self' https://img.youtube.com; media-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+
 pub async fn run(config: Config) {
     let db = db::with_db(config.redis_url.to_string()).unwrap();
 
@@ -121,7 +123,7 @@ pub async fn run(config: Config) {
         .or(view_post_frag)
         .unify()
         .map(warp::reply::html)
-        .map(|reply| warp::reply::with_header(reply, "Content-Security-Policy", "default-src 'none'; connect-src 'self'; font-src 'self'; frame-src https://www.youtube.com; img-src 'self' https://img.youtube.com; media-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'"));
+        .map(|reply| warp::reply::with_header(reply, "Content-Security-Policy", CSP_DIRECTIVE));
 
     let json_body = warp::body::content_length_limit(1024 * 1024 * 5).and(warp::body::json());
 
@@ -441,10 +443,10 @@ fn recover_html(err: warp::Rejection) -> Result<impl warp::Reply, warp::Rejectio
             views::not_found(None).unwrap_or(String::from("Internal Server Error")),
         );
 
-        Ok(warp::reply::with_status(
-            html,
-            warp::http::StatusCode::NOT_FOUND,
-        ))
+        let reply = warp::reply::with_status(html, warp::http::StatusCode::NOT_FOUND);
+        let reply = warp::reply::with_header(reply, "Content-Security-Policy", CSP_DIRECTIVE);
+
+        Ok(reply)
     } else if let Some(err) = err.find::<Error>() {
         error!("{} - {:?}", err, err);
 
@@ -452,11 +454,14 @@ fn recover_html(err: warp::Rejection) -> Result<impl warp::Reply, warp::Rejectio
             views::error(None, err).unwrap_or(String::from("Internal Server Error")),
         );
 
-        Ok(warp::reply::with_status(
+        let reply = warp::reply::with_status(
             html,
             warp::http::StatusCode::from_u16(err.status_code())
                 .unwrap_or(warp::http::StatusCode::INTERNAL_SERVER_ERROR),
-        ))
+        );
+        let reply = warp::reply::with_header(reply, "Content-Security-Policy", CSP_DIRECTIVE);
+
+        Ok(reply)
     } else {
         error!("Unhandled Error - {:?}", err);
         Err(err)
