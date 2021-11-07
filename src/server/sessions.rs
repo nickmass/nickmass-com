@@ -1,5 +1,5 @@
-use ring::aead::BoundKey;
-use ring::{aead, rand};
+use ring::aead;
+use ring::rand::{SecureRandom, SystemRandom};
 
 use super::db::Connection;
 
@@ -8,63 +8,30 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
 pub struct Session {
-    db: Connection,
-    rand: rand::SystemRandom,
-    sealing_key: aead::SealingKey<CountingNonce>,
-    opening_key: aead::OpeningKey<CountingNonce>,
-}
-
-struct CountingNonce {
-    val: u64,
-}
-
-impl CountingNonce {
-    fn new() -> Self {
-        CountingNonce { val: 0 }
-    }
-}
-
-impl aead::NonceSequence for CountingNonce {
-    fn advance(&mut self) -> Result<aead::Nonce, ring::error::Unspecified> {
-        if self.val == std::u64::MAX {
-            Err(ring::error::Unspecified)
-        } else {
-            self.val += 1;
-            let bytes = self.val.to_ne_bytes();
-            let bytes = [
-                0, 0, 0, 0, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
-                bytes[7],
-            ];
-            Ok(aead::Nonce::assume_unique_for_key(bytes))
-        }
-    }
+    rand: SystemRandom,
+    key: aead::LessSafeKey,
 }
 
 impl Session {
-    pub fn new(db: Connection, session_key: impl AsRef<[u8]>) -> Session {
-        let sealing_key = aead::UnboundKey::new(&aead::AES_256_GCM, session_key.as_ref())
+    pub fn new(session_key: impl AsRef<[u8]>) -> Session {
+        let rand = SystemRandom::new();
+        let key = aead::UnboundKey::new(&aead::AES_256_GCM, session_key.as_ref())
             .expect("Valid session key");
-        let sealing_key = aead::SealingKey::new(sealing_key, CountingNonce::new());
-        let opening_key = aead::UnboundKey::new(&aead::AES_256_GCM, session_key.as_ref())
-            .expect("Valid session key");
-        let opening_key = aead::OpeningKey::new(opening_key, CountingNonce::new());
-        Session {
-            db,
-            rand: rand::SystemRandom::new(),
-            sealing_key,
-            opening_key,
-        }
+        let key = aead::LessSafeKey::new(key);
+        Session { rand, key }
     }
 
-    pub async fn get_store(mut self, addr: IpAddr, sid: Option<impl AsRef<str>>) -> Store {
+    pub async fn get_store(
+        &self,
+        db: &mut Connection,
+        addr: IpAddr,
+        sid: Option<impl AsRef<str>>,
+    ) -> Store {
         if let Some((sid, key)) =
             sid.and_then(|sid| self.decode_sid(addr, &sid).map(|key| (sid, key)))
         {
             let session_key = format!("session:{}", key);
-            let store = redis::cmd("hgetall")
-                .arg(session_key)
-                .query_async(&mut self.db)
-                .await;
+            let store = redis::cmd("hgetall").arg(session_key).query_async(db).await;
 
             let store = match store {
                 Ok(hash) => Store::new(key, sid.as_ref(), hash),
@@ -78,25 +45,30 @@ impl Session {
         }
     }
 
-    pub async fn set_store(mut self, store: Store) {
+    pub async fn set_store(&self, db: &mut Connection, store: Store) {
         let mut pipe = redis::pipe();
         let session_key = format!("session:{}", store.key);
         pipe.hset_multiple(session_key.as_str(), store.values().as_slice());
         pipe.expire(session_key.as_str(), 60 * 60 * 24 * 90);
-        let _: Result<(), _> = pipe.query_async(&mut self.db).await;
+        let _: Result<(), _> = pipe.query_async(db).await;
     }
 
-    fn decode_sid(&mut self, addr: IpAddr, sid: impl AsRef<str>) -> Option<String> {
-        let mut sid_bytes = base64::decode(sid.as_ref()).ok()?;
+    fn decode_sid(&self, addr: IpAddr, sid: impl AsRef<str>) -> Option<String> {
+        let sid = sid.as_ref();
+        let (nounce_str, sid) = sid.split_once('.')?;
+
+        let mut sid_bytes = base64::decode(sid).ok()?;
+
+        let nonce_bytes = base64::decode(nounce_str).ok()?.try_into().ok()?;
+        let nonce = aead::Nonce::assume_unique_for_key(nonce_bytes);
 
         let sid_bytes = self
-            .opening_key
-            .open_in_place(aead::Aad::empty(), &mut sid_bytes)
+            .key
+            .open_in_place(nonce, aead::Aad::empty(), &mut sid_bytes)
             .ok()?;
+
         let sid_string = String::from_utf8(sid_bytes.to_vec()).ok()?;
-        let mut parts = sid_string.splitn(2, '.');
-        let user_key = parts.next()?;
-        let ip = parts.next()?;
+        let (user_key, ip) = sid_string.split_once('.')?;
 
         if ip == addr.to_string() {
             Some(user_key.to_string())
@@ -106,7 +78,6 @@ impl Session {
     }
 
     fn create_key(&self) -> String {
-        use ring::rand::SecureRandom;
         let mut user_key = [0; 32];
         self.rand
             .fill(&mut user_key)
@@ -115,7 +86,6 @@ impl Session {
     }
 
     pub fn create_nounce(&self) -> String {
-        use ring::rand::SecureRandom;
         let mut nonce_bytes = [0; 12];
         self.rand
             .fill(&mut nonce_bytes)
@@ -123,14 +93,24 @@ impl Session {
         base64::encode(&nonce_bytes[..])
     }
 
-    fn create_sid(&mut self, user_key: impl AsRef<str>, addr: IpAddr) -> String {
-        let mut sid: Vec<u8> = format!("{}.{}", user_key.as_ref(), addr).as_bytes().into();
+    fn create_sid(&self, user_key: impl AsRef<str>, addr: IpAddr) -> String {
+        use std::io::Write;
 
-        self.sealing_key
-            .seal_in_place_append_tag(aead::Aad::empty(), &mut sid)
+        let mut nonce_bytes = [0; aead::NONCE_LEN];
+        self.rand
+            .fill(&mut nonce_bytes)
+            .expect("Crypto error, could not fill sid nonce");
+        let nonce_str = base64::encode(&nonce_bytes);
+        let nonce = aead::Nonce::assume_unique_for_key(nonce_bytes);
+
+        let mut sid: Vec<u8> = Vec::new();
+        let _ = write!(&mut sid, "{}.{}", user_key.as_ref(), addr);
+
+        self.key
+            .seal_in_place_append_tag(nonce, aead::Aad::empty(), &mut sid)
             .expect("Crypto error, failed to encrypt");
 
-        base64::encode(&sid)
+        format!("{}.{}", nonce_str, base64::encode(&sid))
     }
 }
 

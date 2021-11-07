@@ -2,24 +2,28 @@
 name = "nickmass-com"
 version = "0.1.0"
 authors = ["Nick Massey <nickmass@nickmass.com>"]
-edition = "2018"
+edition = "2021"
 
 [dependencies]
-futures= "0.3.8"
-serde = { version = "1.0", features = ["derive"] }
-warp = "0.3.1"
-redis = { version = "0.20.0", features = ["tokio-comp"] }
-serde_json = "1.0"
-url = "2.2"
-reqwest = { version = "0.11.1", features = ["json", "rustls-tls"], default-features = false }
-jwt = "0.11.0"
-base64 = "0.13.0"
-ring = "0.16.2"
-env_logger = "0.8.1"
-log = "0.4.11"
 askama = "0.10.5"
-pulldown-cmark = "0.8.0"
+axum = { version = "0.3.0", features = ["json", "tower-log"] }
+base64 = "0.13.0"
 chrono = "0.4.19"
-structopt = "0.3.20"
-tokio = { version = "1.2", features = ["full"] }
-toml = "0.5.7"
+deadpool-redis = "0.10.0"
+futures= "0.3.15"
+http = "0.2.4"
+jwt = "0.13.0"
+pulldown-cmark = "0.8.0"
+redis = { version = "0.21.0", features = ["tokio-comp"] }
+reqwest = { version = "0.11.3", features = ["json", "rustls-tls"], default-features = false }
+ring = "0.16.20"
+serde = { version = "1.0.126", features = ["derive"] }
+serde_json = "1.0.64"
+structopt = "0.3.21"
+tokio = { version = "1.6.0", features = ["full"] }
+toml = "0.5.8"
+tower = { version = "0.4.7", features = ["full"] }
+tower-http = { version = "0.1.1", features = ["full"] }
+tracing = "0.1.26"
+tracing-subscriber = "0.2.18"
+url = "2.2.2"

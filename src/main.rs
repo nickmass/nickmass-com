@@ -1,27 +1,43 @@
-#![recursion_limit = "128"]
-#![type_length_limit = "2022793"]
-
-use log::info;
 use tokio::runtime::Runtime;
+use tracing::metadata::LevelFilter;
+use tracing_subscriber::prelude::*;
 
 mod server;
 use server::Config;
 
 fn main() {
     let config = Config::load();
-    let mut builder = env_logger::Builder::new();
-    match (config.verbosity, config.silent) {
-        (1, true) => builder.filter(Some("nickmass_com"), log::LevelFilter::Error),
-        (2, true) => builder.filter(Some("nickmass_com"), log::LevelFilter::Warn),
-        (_, true) => builder.filter_level(log::LevelFilter::Off),
-        (0, _) | (1, _) => builder.filter(Some("nickmass_com"), log::LevelFilter::Info),
-        (2, _) => builder.filter(Some("nickmass_com"), log::LevelFilter::Debug),
-        (3, _) => builder.filter(Some("nickmass_com"), log::LevelFilter::Trace),
-        _ => builder.filter(None, log::LevelFilter::Trace),
-    };
-    builder.write_style(env_logger::WriteStyle::Auto).init();
 
-    info!("Config loaded");
+    let log_filter = tracing_subscriber::filter::Targets::new().with_default(LevelFilter::OFF);
+    let log_filter = match (config.verbosity, config.silent) {
+        (1, true) => log_filter
+            .with_target("nickmass_com", LevelFilter::ERROR)
+            .with_target("tower_http", LevelFilter::ERROR),
+        (2, true) => log_filter
+            .with_target("nickmass_com", LevelFilter::WARN)
+            .with_target("tower_http", LevelFilter::WARN),
+        (_, true) => log_filter.with_default(LevelFilter::OFF),
+        (0, _) | (1, _) => log_filter
+            .with_target("nickmass_com", LevelFilter::INFO)
+            .with_target("tower_http", LevelFilter::INFO)
+            .with_default(LevelFilter::ERROR),
+        (2, _) => log_filter
+            .with_target("nickmass_com", LevelFilter::DEBUG)
+            .with_target("tower_http", LevelFilter::DEBUG)
+            .with_default(LevelFilter::WARN),
+        (3, _) => log_filter
+            .with_target("nickmass_com", LevelFilter::TRACE)
+            .with_target("tower_http", LevelFilter::TRACE)
+            .with_default(LevelFilter::INFO),
+        _ => log_filter.with_default(LevelFilter::TRACE),
+    };
+
+    tracing_subscriber::registry()
+        .with(log_filter)
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    tracing::info!("config loaded");
 
     let rt = Runtime::new().unwrap();
     rt.block_on(server::run(config));

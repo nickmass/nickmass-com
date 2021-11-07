@@ -1,6 +1,6 @@
+use http::Uri;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use structopt::{clap, StructOpt};
-use warp::http::Uri;
 
 use std::fs::File;
 use std::io::Read;
@@ -57,6 +57,10 @@ pub struct ConfigBuilder {
     #[structopt(short = "r", long = "redis")]
     /// The connection string to the redis datastore
     pub redis_url: Option<Uri>,
+    #[serde(default)]
+    #[structopt(short = "a", long = "assets")]
+    /// The directory to serve website static assets from
+    pub asset_dir: Option<String>,
     #[serde(skip)]
     #[structopt(short = "c", long = "config", default_value = "./config.toml")]
     /// The config file to load default settings from
@@ -93,6 +97,7 @@ impl ConfigBuilder {
             listen_ip: self.listen_ip.unwrap_or([0, 0, 0, 0].into()),
             listen_port: self.listen_port.unwrap_or(80),
             redis_url: self.redis_url.ok_or_else(|| "redis_url")?,
+            asset_dir: self.asset_dir.unwrap_or("public".to_string()),
             verbosity: self.verbosity,
             silent: self.silent,
         };
@@ -111,6 +116,7 @@ impl ConfigBuilder {
             listen_ip: self.listen_ip.or(other.listen_ip),
             listen_port: self.listen_port.or(other.listen_port),
             redis_url: self.redis_url.or(other.redis_url),
+            asset_dir: self.asset_dir.or(other.asset_dir),
             config_file: self.config_file,
             verbosity: self.verbosity,
             silent: self.silent,
@@ -132,6 +138,7 @@ pub struct Config {
     pub base_url: Uri,
     pub silent: bool,
     pub verbosity: u8,
+    pub asset_dir: String,
 }
 
 impl Config {
@@ -151,6 +158,7 @@ impl Config {
                     listen_ip: Some([0, 0, 0, 0].into()),
                     listen_port: 80.into(),
                     redis_url: Uri::from_static("redis://server:port/db").into(),
+                    asset_dir: Some("public".into()),
                     ..Default::default()
                 };
 

@@ -1,7 +1,7 @@
 use std::fmt;
 
+use deadpool_redis::{BuildError, PoolError};
 use serde::{Deserialize, Serialize};
-use warp::reject::Reject;
 
 #[derive(Debug)]
 pub enum Error {
@@ -11,11 +11,10 @@ pub enum Error {
     ResourceNotFound(Resource),
     Unauthorized,
     NotFound,
-    IpRequired,
     Timeout(tokio::time::error::Elapsed),
+    Pool(deadpool_redis::PoolError),
+    CreatePool(deadpool_redis::CreatePoolError),
 }
-
-impl Reject for Error {}
 
 #[derive(Debug)]
 pub enum Resource {
@@ -24,7 +23,7 @@ pub enum Resource {
 }
 
 impl Error {
-    pub fn to_json(&self) -> JsonError {
+    pub fn json(&self) -> JsonError {
         JsonError {
             code: self.status_code(),
             message: self.to_string(),
@@ -38,6 +37,10 @@ impl Error {
             Error::Unauthorized => 401,
             _ => 500,
         }
+    }
+
+    pub fn status(&self) -> axum::http::StatusCode {
+        axum::http::StatusCode::from_u16(self.status_code()).unwrap()
     }
 }
 
@@ -59,6 +62,24 @@ impl From<tokio::time::error::Elapsed> for Error {
     }
 }
 
+impl From<deadpool_redis::PoolError> for Error {
+    fn from(other: deadpool_redis::PoolError) -> Self {
+        match other {
+            PoolError::Backend(e) => Error::Redis(e),
+            _ => Error::Pool(other),
+        }
+    }
+}
+
+impl From<deadpool_redis::CreatePoolError> for Error {
+    fn from(other: deadpool_redis::CreatePoolError) -> Self {
+        match other {
+            deadpool_redis::CreatePoolError::Build(BuildError::Backend(e)) => Error::Redis(e),
+            _ => Error::CreatePool(other),
+        }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -68,8 +89,9 @@ impl fmt::Display for Error {
             Error::Unauthorized => write!(f, "Unauthorized"),
             Error::Render((name, err)) => write!(f, "Failed to render {} {}", name, err),
             Error::NotFound => write!(f, "Not found"),
-            Error::IpRequired => write!(f, "Ip required for session data"),
             Error::Timeout(timeout) => write!(f, "Timeout: {}", timeout),
+            Error::CreatePool(err) => write!(f, "Create Pool: {}", err),
+            Error::Pool(err) => write!(f, "Pool: {}", err),
         }
     }
 }
@@ -80,4 +102,10 @@ impl std::error::Error for Error {}
 pub struct JsonError {
     pub code: u16,
     pub message: String,
+}
+
+impl From<Error> for JsonError {
+    fn from(err: Error) -> Self {
+        err.json()
+    }
 }
