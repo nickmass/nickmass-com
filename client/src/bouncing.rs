@@ -143,7 +143,7 @@ pub struct BouncingHeader<'ctx> {
     balls: Vec<Ball>,
     width: f32,
     height: f32,
-    last_tick: f64,
+    timestamp: f64,
     vertex_buffers: VertexBuffers<Vertex, u16>,
     stroke_options: StrokeOptions,
     program: GlProgram<'ctx>,
@@ -199,7 +199,7 @@ impl<'ctx> BouncingHeader<'ctx> {
             width,
             height,
             balls,
-            last_tick: 0.,
+            timestamp: 0.,
             vertex_buffers,
             stroke_options,
             program,
@@ -255,22 +255,25 @@ impl SiteHeader for BouncingHeader<'static> {
         self.logo.resize(self.width, self.height);
     }
 
-    fn tick(&mut self, time: f64, mouse_position: Option<(f32, f32)>) -> bool {
-        if self.last_tick == 0. {
-            self.last_tick = time;
+    fn tick(&mut self, timestamp: f64, mouse_position: Option<(f32, f32)>) -> bool {
+        let d_timestamp = timestamp - self.timestamp;
+
+        let dt = (d_timestamp * 60.0 / 1000.0) as f32;
+
+        self.timestamp = timestamp;
+
+        if d_timestamp > 1000.0 {
             return self.alive;
         }
 
-        let d_time = time - self.last_tick;
-        self.last_tick = time;
         let bounds = &self.bounds;
         let matrix = self.matrix();
 
         for b in &mut self.balls {
-            b.tick(d_time, bounds);
+            b.tick(dt, bounds);
         }
 
-        self.logo.tick(mouse_position);
+        self.logo.tick(dt, mouse_position);
 
         let max_distance = 100.0;
         let mouse = mouse_position.unwrap_or((max_distance * -2.0, max_distance * -2.0));
@@ -498,9 +501,8 @@ impl Ball {
         ]
     }
 
-    fn tick(&mut self, _d_time: f64, bounds: &Bounds<f32>) {
-        let d_time = 1.0;
-        let new_location = self.location + (self.direction * self.speed * d_time);
+    fn tick(&mut self, dt: f32, bounds: &Bounds<f32>) {
+        let new_location = self.location + (self.direction * self.speed * dt);
 
         if !bounds.in_x_bounds(new_location) {
             self.direction.x *= -1.0;

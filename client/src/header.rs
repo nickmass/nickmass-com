@@ -158,6 +158,7 @@ struct Header<'ctx> {
     width: f32,
     height: f32,
     frame_buffer: GlFrameBuffer<'ctx>,
+    timestamp: f64,
 }
 
 impl<'ctx> Header<'ctx> {
@@ -184,6 +185,7 @@ impl<'ctx> Header<'ctx> {
             width,
             height,
             frame_buffer,
+            timestamp: 0.0,
         }
     }
 
@@ -201,13 +203,23 @@ impl<'ctx> Header<'ctx> {
         ]
     }
 
-    fn tick(&mut self, _time: f64, mouse_pos: Option<(f32, f32)>) {
+    fn tick(&mut self, timestamp: f64, mouse_pos: Option<(f32, f32)>) {
         self.count += 1;
 
-        self.color_cycle.tick();
-        self.circles.tick();
-        self.mouse_circle.tick(mouse_pos);
-        self.logo.tick(mouse_pos);
+        let d_timestamp = timestamp - self.timestamp;
+
+        let dt = (d_timestamp * 60.0 / 1000.0) as f32;
+
+        self.timestamp = timestamp;
+
+        if d_timestamp > 1000.0 {
+            return;
+        }
+
+        self.color_cycle.tick(dt);
+        self.circles.tick(dt);
+        self.mouse_circle.tick(dt, mouse_pos);
+        self.logo.tick(dt, mouse_pos);
 
         self.frame_buffer.bind();
         self.gl.enable(GL::BLEND);
@@ -262,19 +274,21 @@ impl<'ctx> ColorCycle<'ctx> {
         }
     }
 
-    fn tick(&mut self) {
+    fn tick(&mut self, dt: f32) {
+        let inc = self.increment * dt;
+
         self.r = if self.r < 1.0 {
-            self.r + self.increment
+            self.r + inc
         } else {
             self.r - 2.0
         };
         self.g = if self.g < 1.0 {
-            self.g + self.increment
+            self.g + inc
         } else {
             self.g - 2.0
         };
         self.b = if self.b < 1.0 {
-            self.b + self.increment
+            self.b + inc
         } else {
             self.b - 2.0
         };
@@ -306,11 +320,11 @@ impl Circle {
         }
     }
 
-    fn tick(&mut self) {
+    fn tick(&mut self, dt: f32) {
         self.center.1 = if self.center.1 > 2.0 {
             -2.0
         } else {
-            self.center.1 + self.speed
+            self.center.1 + (self.speed * dt)
         };
     }
 
@@ -408,9 +422,9 @@ impl<'ctx> CircleCollection<'ctx> {
         }
     }
 
-    fn tick(&mut self) {
+    fn tick(&mut self, dt: f32) {
         for circle in &mut self.circles {
-            circle.tick();
+            circle.tick(dt);
         }
     }
 
@@ -459,12 +473,12 @@ impl<'ctx> MouseCircle<'ctx> {
         }
     }
 
-    fn tick(&mut self, pos: Option<(f32, f32)>) {
+    fn tick(&mut self, dt: f32, pos: Option<(f32, f32)>) {
         if let Some(pos) = pos {
             self.count = if self.count > 1.0 {
                 self.count - 2.0
             } else {
-                self.count + 0.03
+                self.count + (0.03 * dt)
             };
 
             self.circle.radius = 0.1;
@@ -558,20 +572,25 @@ impl<'ctx> Logo<'ctx> {
         ]
     }
 
-    pub fn tick(&mut self, mouse_pos: Option<(f32, f32)>) {
-        if let Some(mouse) = mouse_pos {
+    pub fn tick(&mut self, dt: f32, mouse_pos: Option<(f32, f32)>) {
+        let (x, y) = if let Some(mouse) = mouse_pos {
             let mouse = (
                 mouse.0 / self.width * 2.0 - 1.0,
                 mouse.1 / self.height * -2.0 + 1.0,
             );
             let diff_x = (mouse.0 - self.mouse_pos.0) / 5.0;
             let diff_y = (mouse.1 - self.mouse_pos.1) / 5.0;
-            self.mouse_pos = (self.mouse_pos.0 + diff_x, self.mouse_pos.1 + diff_y);
+            (diff_x, diff_y)
         } else {
             let diff_x = (0.0 - self.mouse_pos.0) / 20.0;
             let diff_y = (0.0 - self.mouse_pos.1) / 20.0;
-            self.mouse_pos = (self.mouse_pos.0 + diff_x, self.mouse_pos.1 + diff_y);
-        }
+            (diff_x, diff_y)
+        };
+
+        let x = x * dt;
+        let y = y * dt;
+
+        self.mouse_pos = (self.mouse_pos.0 + x, self.mouse_pos.1 + y);
     }
 
     pub fn resize(&mut self, width: f32, height: f32) {
