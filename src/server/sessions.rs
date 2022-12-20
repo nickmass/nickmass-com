@@ -21,12 +21,13 @@ impl Session {
         Session { rand, key }
     }
 
+    #[tracing::instrument(name = "session::load", skip_all)]
     pub async fn get_store(
         &self,
         db: &mut Connection,
         addr: IpAddr,
         sid: Option<impl AsRef<str>>,
-    ) -> Store {
+    ) -> SessionStore {
         if let Some((sid, key)) =
             sid.and_then(|sid| self.decode_sid(addr, &sid).map(|key| (sid, key)))
         {
@@ -34,18 +35,19 @@ impl Session {
             let store = redis::cmd("hgetall").arg(session_key).query_async(db).await;
 
             let store = match store {
-                Ok(hash) => Store::new(key, sid.as_ref(), hash),
-                Err(_) => Store::empty(key, sid.as_ref()),
+                Ok(hash) => SessionStore::new(key, sid.as_ref(), hash),
+                Err(_) => SessionStore::empty(key, sid.as_ref()),
             };
             store
         } else {
             let key = self.create_key();
             let sid = self.create_sid(&key, addr);
-            Store::empty(key, sid)
+            SessionStore::empty(key, sid)
         }
     }
 
-    pub async fn set_store(&self, db: &mut Connection, store: Store) {
+    #[tracing::instrument(name = "session::save", skip_all)]
+    pub async fn set_store(&self, db: &mut Connection, store: SessionStore) {
         let mut pipe = redis::pipe();
         let session_key = format!("session:{}", store.key);
         pipe.hset_multiple(session_key.as_str(), store.values().as_slice());
@@ -115,23 +117,27 @@ impl Session {
 }
 
 #[derive(Debug, Clone)]
-pub struct Store {
+pub struct SessionStore {
     key: Arc<String>,
     sid: Arc<String>,
     inner: Arc<Mutex<HashMap<String, String>>>,
 }
 
-impl Store {
-    fn new(key: impl Into<String>, sid: impl Into<String>, data: HashMap<String, String>) -> Store {
-        Store {
+impl SessionStore {
+    fn new(
+        key: impl Into<String>,
+        sid: impl Into<String>,
+        data: HashMap<String, String>,
+    ) -> SessionStore {
+        SessionStore {
             key: Arc::new(key.into()),
             sid: Arc::new(sid.into()),
             inner: Arc::new(Mutex::new(data)),
         }
     }
 
-    fn empty(key: impl Into<String>, sid: impl Into<String>) -> Store {
-        Store {
+    fn empty(key: impl Into<String>, sid: impl Into<String>) -> SessionStore {
+        SessionStore {
             key: Arc::new(key.into()),
             sid: Arc::new(sid.into()),
             inner: Arc::new(Mutex::new(HashMap::new())),

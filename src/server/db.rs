@@ -17,6 +17,8 @@ impl Db {
             pool: Arc::new(pool),
         })
     }
+
+    #[tracing::instrument(name = "db::get", skip_all, err)]
     pub async fn get(&self) -> Result<Connection, Error> {
         Ok(self.pool.get().await?)
     }

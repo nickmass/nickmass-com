@@ -6,7 +6,8 @@ edition = "2021"
 
 [dependencies]
 askama = "0.10.5"
-axum = { version = "0.3.0", features = ["json", "tower-log"] }
+axum = { version = "0.6.0", features = ["json", "tower-log", "macros", "headers"] }
+axum-extra = { version = "0.4.0", features = ["cookie"] }
 base64 = "0.13.0"
 chrono = "0.4.19"
 deadpool-redis = "0.10.0"
@@ -20,10 +21,11 @@ ring = "0.16.20"
 serde = { version = "1.0.126", features = ["derive"] }
 serde_json = "1.0.64"
 structopt = "0.3.21"
+time = "0.3.17"
 tokio = { version = "1.6.0", features = ["full"] }
 toml = "0.5.8"
 tower = { version = "0.4.7", features = ["full"] }
-tower-http = { version = "0.1.1", features = ["full"] }
-tracing = "0.1.26"
-tracing-subscriber = "0.2.18"
+tower-http = { version = "0.3.0", features = ["full"] }
+tracing = "0.1.35"
+tracing-subscriber = "0.3"
 url = "2.2.2"

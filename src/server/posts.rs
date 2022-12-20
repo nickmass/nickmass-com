@@ -93,6 +93,7 @@ impl PostClient {
         PostClient { db }
     }
 
+    #[tracing::instrument(name = "post::get_all", skip_all, err)]
     pub async fn get_all(mut self, limit: i64, skip: i64) -> Result<PostPage, Error> {
         let post_ids: Vec<i64> = redis::cmd("lrange")
             .arg("posts")
@@ -139,10 +140,12 @@ impl PostClient {
         })
     }
 
+    #[tracing::instrument(name = "post::get", skip_all, err)]
     pub async fn get(mut self, id: u64) -> Result<Post, Error> {
         Self::get_by_id(&mut self.db, id).await
     }
 
+    #[tracing::instrument(name = "post::get_by_fragment", skip_all, err)]
     pub async fn get_by_fragment(mut self, fragment: impl AsRef<str>) -> Result<Post, Error> {
         let fragment_key: String = format!("postFragment:{}", fragment.as_ref());
         let id = redis::cmd("get")
@@ -157,6 +160,7 @@ impl PostClient {
         }
     }
 
+    #[tracing::instrument(name = "post::get_by_id", skip_all, err)]
     async fn get_by_id(db: &mut Connection, id: u64) -> Result<Post, Error> {
         let post_key = format!("post:{}", id);
         let post: MaybePost = redis::cmd("hgetall").arg(post_key).query_async(db).await?;
@@ -176,6 +180,7 @@ impl PostClient {
 }
 
 impl Authenticated<PostClient> {
+    #[tracing::instrument(name = "post::create", skip_all, err)]
     pub async fn create(mut self, mut post: Post) -> Result<u64, Error> {
         post.id = 0;
         post.author_id = self.user().id;
@@ -213,6 +218,7 @@ impl Authenticated<PostClient> {
         Ok(post.id)
     }
 
+    #[tracing::instrument(name = "post::update", skip_all, err)]
     pub async fn update(mut self, id: u64, post: Post) -> Result<u64, Error> {
         let post_key = format!("post:{}", id);
         let exists: bool = redis::cmd("exists")
@@ -241,6 +247,7 @@ impl Authenticated<PostClient> {
         }
     }
 
+    #[tracing::instrument(name = "post::delete", skip_all, err)]
     pub async fn delete(self, _id: u64) -> Result<(), Error> {
         Err(Error::NotFound)
     }

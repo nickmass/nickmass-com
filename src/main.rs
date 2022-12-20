@@ -8,6 +8,13 @@ use server::Config;
 fn main() {
     let config = Config::load();
 
+    tracing::info!("config loaded");
+
+    let rt = Runtime::new().unwrap();
+    rt.block_on(run(config));
+}
+
+async fn run(config: Config) {
     let log_filter = tracing_subscriber::filter::Targets::new().with_default(LevelFilter::OFF);
     let log_filter = match (config.verbosity, config.silent) {
         (1, true) => log_filter
@@ -37,8 +44,5 @@ fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    tracing::info!("config loaded");
-
-    let rt = Runtime::new().unwrap();
-    rt.block_on(server::run(config));
+    server::run(config).await
 }

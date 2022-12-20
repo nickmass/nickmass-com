@@ -50,10 +50,12 @@ impl UserClient {
         UserClient { db }
     }
 
+    #[tracing::instrument(name = "user::get", skip_all, err)]
     pub async fn get(&mut self, id: u64) -> Result<User, Error> {
         Self::get_by_id(&mut self.db, id).await
     }
 
+    #[tracing::instrument(name = "user::get_social_user", skip_all, err)]
     pub async fn get_social_user(&mut self, social_id: impl AsRef<str>) -> Result<User, Error> {
         let social_user_key = format!("socialUser:{}", social_id.as_ref());
         let user_id = redis::cmd("get")
@@ -63,6 +65,7 @@ impl UserClient {
         Self::get_by_id(&mut self.db, user_id).await
     }
 
+    #[tracing::instrument(name = "user::get_by_id", skip_all, err)]
     async fn get_by_id(conn: &mut Connection, id: u64) -> Result<User, Error> {
         let user_key = format!("user:{}", id);
         let user: MaybeUser = redis::cmd("hgetall")

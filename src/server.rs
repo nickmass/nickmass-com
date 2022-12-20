@@ -1,14 +1,16 @@
-use axum::body::Body;
-use axum::error_handling::{HandleErrorExt, HandleErrorLayer};
-use axum::extract::{ConnectInfo, Extension, Path, Query, RequestParts};
-use axum::handler::Handler;
+use axum::body::HttpBody;
+use axum::extract::{ConnectInfo, Extension, Path, Query, State};
+use axum::http::request::Parts;
 use axum::http::{header, HeaderValue, Request};
-use axum::response::{Headers, Html, IntoResponse};
-use axum::routing::get;
-use axum::{async_trait, AddExtensionLayer, Json, Router};
+use axum::middleware::Next;
+use axum::response::{Html, IntoResponse, IntoResponseParts, Redirect};
+use axum::routing::{get, get_service};
+use axum::{async_trait, Json, RequestPartsExt, Router, TypedHeader};
+use axum_extra::extract::cookie::Cookie;
 use reqwest::StatusCode;
-use tower::filter::AsyncFilterLayer;
 use tower::ServiceBuilder;
+use tower_http::classify::ServerErrorsFailureClass;
+use tower_http::trace::{OnFailure, OnRequest, OnResponse};
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -29,49 +31,41 @@ use auth::Authenticated;
 use db::Db;
 use error::{Error, JsonError};
 use posts::{Post, PostClient, PostPage};
-use sessions::{Session, Store};
+use sessions::{Session, SessionStore};
 use users::{User, UserClient};
 
 const CSP_DIRECTIVE: &'static str = "default-src 'none'; connect-src 'self'; font-src 'self'; frame-src https://www.youtube.com; img-src 'self' https://img.youtube.com; media-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+
+#[derive(axum::extract::FromRef, Clone)]
+struct ServerState {
+    config: Arc<Config>,
+    db: Db,
+    session: Arc<Session>,
+}
 
 pub async fn run(config: Config) {
     let config = Arc::new(config);
     let db = Db::new(config.redis_url.to_string()).unwrap();
     let session = Arc::new(Session::new(config.session_key.as_slice()));
 
-    let html_layers = ServiceBuilder::new()
-        .layer(AddExtensionLayer::new(config.clone()))
-        .layer(AddExtensionLayer::new(db.clone()))
-        .layer(AddExtensionLayer::new(session.clone()))
-        .layer(HandleErrorLayer::new(handle_html_error))
-        .layer(AsyncFilterLayer::new(add_session))
-        .layer(
-            tower_http::set_header::SetResponseHeaderLayer::<_, Body>::if_not_present(
-                header::CONTENT_SECURITY_POLICY,
-                HeaderValue::from_static(CSP_DIRECTIVE),
-            ),
-        );
+    let state = ServerState {
+        config: config.clone(),
+        db,
+        session,
+    };
 
-    let api_layers = ServiceBuilder::new()
-        .layer(AddExtensionLayer::new(config.clone()))
-        .layer(AddExtensionLayer::new(db.clone()))
-        .layer(AddExtensionLayer::new(session.clone()))
-        .layer(HandleErrorLayer::new(handle_json_error))
-        .layer(AsyncFilterLayer::new(add_session));
-
-    let auth_layers = ServiceBuilder::new()
-        .layer(AddExtensionLayer::new(config.clone()))
-        .layer(AddExtensionLayer::new(db.clone()))
-        .layer(AddExtensionLayer::new(session.clone()))
-        .layer(HandleErrorLayer::new(handle_html_error))
-        .layer(AsyncFilterLayer::new(add_session));
+    let html_layers = ServiceBuilder::new().layer(
+        tower_http::set_header::SetResponseHeaderLayer::<_>::if_not_present(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(CSP_DIRECTIVE),
+        ),
+    );
 
     tracing::info!("serving assets from: {}", config.asset_dir);
-    let public_static = tower_http::services::ServeDir::new(config.asset_dir.as_str())
-        .handle_error(|e| {
-            tracing::error!("static file error: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        });
+    let public_static = get_service(tower_http::services::ServeDir::new(
+        config.asset_dir.as_str(),
+    ))
+    .handle_error(static_file_error_handler);
 
     let static_files = Router::new()
         .route("/css/*path", public_static.clone())
@@ -88,91 +82,224 @@ pub async fn run(config: Config) {
                 .put(api_posts_put)
                 .delete(api_posts_delete),
         )
-        .layer(api_layers)
-        .fallback(api_fallback.into_service());
+        .with_session_layer::<JsonError>(state.clone())
+        .fallback(api_fallback);
 
     let auth = Router::new()
         .route("/logout", get(auth_logout))
         .route("/google", get(auth_google))
-        .route("/google/return", get(auth_google_return))
-        .layer(auth_layers);
+        .route("/google/return", get(auth_google_return));
 
     let app = Router::new()
         .route("/", get(view_index))
         .route("/page/:page", get(view_page))
         .route("/post/:post", get(view_post))
+        .nest("/auth", auth)
+        .with_session_layer::<HtmlError>(state.clone())
         .layer(html_layers)
         .nest("/api", api)
-        .nest("/auth", auth)
-        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(
+            tower_http::trace::TraceLayer::new_for_http()
+                .on_request(MassTraceLog)
+                .on_response(MassTraceLog)
+                .on_failure(MassTraceLog),
+        )
         .merge(static_files)
-        .fallback(view_fallback.into_service());
+        .fallback(view_fallback)
+        .with_state(state.clone());
 
     tracing::info!(
         "starting server on: {}:{}",
         config.listen_ip,
         config.listen_port
     );
+
+    let shutdown = async {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut term = signal(SignalKind::terminate()).expect("unabled to listen to sigterm");
+        let mut int = signal(SignalKind::interrupt()).expect("unabled to listen to sigint");
+
+        tokio::select! {
+            _ = term.recv() => (),
+            _ = int.recv() => (),
+        }
+
+        tracing::info!("signal received shutting down")
+    };
+
     axum::Server::bind(&(config.listen_ip, config.listen_port).into())
-        .serve(app.into_make_service_with_connect_info::<SocketAddr, _>())
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+        .with_graceful_shutdown(shutdown)
         .await
         .unwrap()
 }
 
-async fn add_session(mut req: Request<Body>) -> Result<Request<Body>, Error> {
-    let addr = req.extensions().get::<ConnectInfo<SocketAddr>>();
-    let db = req.extensions().get::<Db>();
-    let session = req.extensions().get::<Arc<Session>>();
+#[derive(Clone, Copy, Debug)]
+struct MassTraceLog;
 
-    if let (Some(db), Some(ConnectInfo(addr)), Some(session)) = (db, addr, session) {
-        let sid = cookie_value(&req, "sid").map(String::from);
-
-        let ip = addr.ip();
-        let mut connection = db.get().await?;
-
-        let store = session.get_store(&mut connection, ip, sid).await;
-        req.extensions_mut().insert(store);
+impl<B> OnRequest<B> for MassTraceLog {
+    fn on_request(&mut self, _request: &Request<B>, _span: &tracing::Span) {
+        tracing::info!("request started")
     }
-    Ok(req)
 }
 
-fn cookie_value<'r>(request: &'r Request<Body>, key: &str) -> Option<&'r str> {
-    request
-        .headers()
-        .get(header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| {
-            s.split(';')
-                .map(|v| v.split_once('='))
-                .flatten()
-                .find(|(k, _v)| k.trim() == key)
-                .map(|(_k, v)| v.trim())
-        })
+impl<B> OnResponse<B> for MassTraceLog {
+    fn on_response(
+        self,
+        response: &http::Response<B>,
+        latency: std::time::Duration,
+        span: &tracing::Span,
+    ) {
+        let status = response.status().as_u16().to_string();
+        span.record("http.status_code", &tracing::field::display(status));
+
+        tracing::info!(
+            latency_ms = latency.as_secs_f64() * 1000.0,
+            status = response.status().as_u16(),
+            "request completed"
+        )
+    }
+}
+
+impl OnFailure<ServerErrorsFailureClass> for MassTraceLog {
+    fn on_failure(
+        &mut self,
+        _failure: ServerErrorsFailureClass,
+        latency: std::time::Duration,
+        _span: &tracing::Span,
+    ) {
+        tracing::error!(
+            latency_ms = latency.as_secs_f64() * 1000.0,
+            "request failed"
+        )
+    }
+}
+
+impl<B> SessionLayerExt<ServerState> for Router<ServerState, B>
+where
+    B: HttpBody + Send + 'static,
+{
+    fn with_session_layer<E: From<Error> + IntoResponse + 'static>(
+        self,
+        state: ServerState,
+    ) -> Self {
+        self.layer(axum::middleware::from_fn_with_state(
+            state,
+            add_session::<_, E>,
+        ))
+    }
+}
+
+trait SessionLayerExt<S> {
+    fn with_session_layer<E: From<Error> + IntoResponse + 'static>(self, state: S) -> Self;
+}
+
+async fn static_file_error_handler(err: std::io::Error) -> impl IntoResponse {
+    tracing::error!("static file error: {}", err);
+    StatusCode::INTERNAL_SERVER_ERROR
+}
+
+struct SessionClear;
+
+impl IntoResponse for SessionClear {
+    fn into_response(self) -> axum::response::Response {
+        (self, ()).into_response()
+    }
+}
+
+impl IntoResponseParts for SessionClear {
+    type Error = std::convert::Infallible;
+
+    fn into_response_parts(
+        self,
+        mut res: axum::response::ResponseParts,
+    ) -> Result<axum::response::ResponseParts, Self::Error> {
+        res.extensions_mut().insert(SessionClear);
+        Ok(res)
+    }
+}
+
+impl IntoResponse for SessionStore {
+    fn into_response(self) -> axum::response::Response {
+        (self, ()).into_response()
+    }
+}
+
+impl IntoResponseParts for SessionStore {
+    type Error = std::convert::Infallible;
+
+    fn into_response_parts(
+        self,
+        mut res: axum::response::ResponseParts,
+    ) -> Result<axum::response::ResponseParts, Self::Error> {
+        res.extensions_mut().insert(self);
+        Ok(res)
+    }
+}
+
+async fn add_session<B, E: From<Error> + IntoResponse>(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    db: State<Db>,
+    session: State<Arc<Session>>,
+    jar: axum_extra::extract::CookieJar,
+    mut req: Request<B>,
+    next: Next<B>,
+) -> Result<impl IntoResponse, E> {
+    let sid = jar.get("sid").map(|c| c.value().to_string());
+
+    let ip = addr.ip();
+    let mut connection = db.get().await?;
+
+    let store = session.get_store(&mut connection, ip, sid).await;
+    req.extensions_mut().insert(store);
+
+    let mut res = next.run(req).await;
+    if let Some(_) = res.extensions_mut().remove::<SessionClear>() {
+        let cookie = Cookie::build("sid", "")
+            .path("/")
+            .http_only(true)
+            .same_site(axum_extra::extract::cookie::SameSite::Lax)
+            .finish();
+        Ok((jar.remove(cookie), res).into_response())
+    } else if let Some(store) = res.extensions_mut().remove::<SessionStore>() {
+        let sid = store.sid();
+        session.set_store(&mut connection, store).await;
+        let cookie = Cookie::build("sid", sid)
+            .path("/")
+            .http_only(true)
+            .max_age(time::Duration::days(30))
+            .same_site(axum_extra::extract::cookie::SameSite::Lax)
+            .finish();
+        Ok((jar.add(cookie), res).into_response())
+    } else {
+        Ok(res.into_response())
+    }
 }
 
 async fn view_index(
-    Extension(db): Extension<Db>,
-    user: Option<Auth>,
+    State(db): State<Db>,
+    user: Option<HtmlAuth>,
 ) -> Result<Html<String>, HtmlError> {
-    let user = user.map(|Auth(user)| user);
+    let user = user.map(|HtmlAuth(user)| user);
     Ok(Html(views::index(user, db.get().await?, None).await?))
 }
 
 async fn view_page(
-    Extension(db): Extension<Db>,
-    user: Option<Auth>,
+    State(db): State<Db>,
+    user: Option<HtmlAuth>,
     Path(page): Path<i64>,
 ) -> Result<Html<String>, HtmlError> {
-    let user = user.map(|Auth(user)| user);
+    let user = user.map(|HtmlAuth(user)| user);
     Ok(Html(views::index(user, db.get().await?, Some(page)).await?))
 }
 
 async fn view_post(
-    Extension(db): Extension<Db>,
-    user: Option<Auth>,
+    State(db): State<Db>,
+    user: Option<HtmlAuth>,
     Path(post): Path<String>,
 ) -> Result<Html<String>, HtmlError> {
-    let user = user.map(|Auth(user)| user);
+    let user = user.map(|HtmlAuth(user)| user);
 
     let db = db.get().await?;
 
@@ -193,7 +320,7 @@ async fn api_user(ApiAuth(user): ApiAuth) -> Json<User> {
     Json(user)
 }
 
-async fn api_posts_get_all(Extension(db): Extension<Db>) -> Result<Json<PostPage>, JsonError> {
+async fn api_posts_get_all(State(db): State<Db>) -> Result<Json<PostPage>, JsonError> {
     let db = db.get().await?;
     let client = PostClient::new(db);
     let posts = client.get_all(100, 0).await?;
@@ -202,7 +329,7 @@ async fn api_posts_get_all(Extension(db): Extension<Db>) -> Result<Json<PostPage
 }
 
 async fn api_posts_get(
-    Extension(db): Extension<Db>,
+    State(db): State<Db>,
     Path(post): Path<String>,
 ) -> Result<Json<Post>, JsonError> {
     let db = db.get().await?;
@@ -218,7 +345,7 @@ async fn api_posts_get(
 }
 
 async fn api_posts_post(
-    Extension(db): Extension<Db>,
+    State(db): State<Db>,
     ApiAuth(user): ApiAuth,
     Json(post): Json<Post>,
 ) -> Result<Json<u64>, JsonError> {
@@ -231,7 +358,7 @@ async fn api_posts_post(
 }
 
 async fn api_posts_put(
-    Extension(db): Extension<Db>,
+    State(db): State<Db>,
     ApiAuth(user): ApiAuth,
     Path(post_id): Path<u64>,
     Json(post): Json<Post>,
@@ -245,7 +372,7 @@ async fn api_posts_put(
 }
 
 async fn api_posts_delete(
-    Extension(db): Extension<Db>,
+    State(db): State<Db>,
     ApiAuth(user): ApiAuth,
     Path(post_id): Path<u64>,
 ) -> Result<Json<()>, JsonError> {
@@ -261,28 +388,20 @@ async fn api_fallback() -> JsonError {
     Error::NotFound.into()
 }
 
-async fn auth_logout(Extension(config): Extension<Arc<Config>>) -> impl IntoResponse {
-    let headers = Headers(vec![
-        (header::LOCATION, config.base_url.to_string()),
-        (
-            header::SET_COOKIE,
-            "sid=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/; SameSite=Lax; HttpOnly"
-                .to_string(),
-        ),
-        (
-            header::CACHE_CONTROL,
-            "no-cache, no-store, must-revalidate".to_string(),
-        ),
-    ]);
+async fn auth_logout(State(config): State<Arc<Config>>) -> impl IntoResponse {
+    let no_cache = axum::headers::CacheControl::new().with_no_store();
 
-    (StatusCode::TEMPORARY_REDIRECT, headers)
+    (
+        SessionClear,
+        TypedHeader(no_cache),
+        Redirect::temporary(&config.base_url.to_string()),
+    )
 }
 
 async fn auth_google(
-    Extension(db): Extension<Db>,
-    Extension(config): Extension<Arc<Config>>,
-    Extension(session): Extension<Arc<Session>>,
-    Extension(store): Extension<Store>,
+    State(config): State<Arc<Config>>,
+    State(session): State<Arc<Session>>,
+    store: SessionStore,
 ) -> Result<impl IntoResponse, HtmlError> {
     let redirect_uri = format!("{}auth/google/return", config.base_url);
     let social_nounce = session.create_nounce();
@@ -304,34 +423,15 @@ async fn auth_google(
     .expect("Config allows valid google url");
 
     let http_uri = auth_url.to_string();
-    let sid = store.sid();
-    let mut connection = db.get().await?;
 
-    session.set_store(&mut connection, store).await;
+    let no_cache = axum::headers::CacheControl::new().with_no_store();
 
-    let headers = Headers(vec![
-        (header::LOCATION, http_uri),
-        (
-            header::SET_COOKIE,
-            format!(
-                "sid={}; Max-Age={}; Path=/; SameSite=Lax; HttpOnly",
-                sid,
-                60 * 60 * 24 * 30
-            ),
-        ),
-        (
-            header::CACHE_CONTROL,
-            "no-cache, no-store, must-revalidate".to_string(),
-        ),
-    ]);
-
-    Ok((StatusCode::TEMPORARY_REDIRECT, headers))
+    Ok((store, TypedHeader(no_cache), Redirect::temporary(&http_uri)))
 }
+
 async fn auth_google_return(
-    Extension(db): Extension<Db>,
-    Extension(config): Extension<Arc<Config>>,
-    Extension(session): Extension<Arc<Session>>,
-    Extension(store): Extension<Store>,
+    State(config): State<Arc<Config>>,
+    store: SessionStore,
     Query(oauth): Query<auth::OauthResponse>,
 ) -> Result<impl IntoResponse, HtmlError> {
     let client = reqwest::Client::new();
@@ -339,90 +439,39 @@ async fn auth_google_return(
     let nounce = store.get("socialNounce");
 
     if Some(oauth.state) != nounce {
-        Err(Error::Unauthorized.into())
-    } else {
-        let raw_res = client
-            .post(&config.oauth_token_url.to_string())
-            .form(&auth::OauthTokenRequest {
-                code: &oauth.code,
-                client_id: &config.oauth_id,
-                client_secret: &config.oauth_secret,
-                redirect_uri: redirect_uri.as_str(),
-                grant_type: "authorization_code",
-            })
-            .send()
-            .await
-            .map_err(Error::from)?;
-
-        let token_res = raw_res
-            .json::<auth::OauthTokenResponse>()
-            .await
-            .map_err(Error::from)?;
-
-        store.set(
-            "socialUser",
-            format!("google:{}", token_res.id_token.claims.sub),
-        );
-        let sid = store.sid();
-
-        let mut connection = db.get().await?;
-
-        session.set_store(&mut connection, store).await;
-
-        let headers = Headers(vec![
-            (header::LOCATION, config.base_url.to_string()),
-            (
-                header::SET_COOKIE,
-                format!(
-                    "sid={}; Max-Age={}; Path=/; SameSite=Lax; HttpOnly",
-                    sid,
-                    60 * 60 * 24 * 30
-                ),
-            ),
-            (
-                header::CACHE_CONTROL,
-                "no-cache, no-store, must-revalidate".to_string(),
-            ),
-        ]);
-
-        Ok((StatusCode::TEMPORARY_REDIRECT, headers))
+        return Err(Error::Unauthorized.into());
     }
-}
 
-fn handle_html_error(error: axum::BoxError) -> (StatusCode, Html<String>) {
-    if let Some(error) = error.downcast_ref::<Error>() {
-        if error.status_code() >= 500 && error.status_code() < 600 {
-            tracing::error!("server error: {}", error);
-        }
-        (
-            error.status(),
-            Html(views::error(None, error).unwrap_or(error.to_string())),
-        )
-    } else {
-        tracing::error!("unhandled error: {}", error);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Html(views::error(None, &Error::NotFound).unwrap_or(error.to_string())),
-        )
-    }
-}
+    let raw_res = client
+        .post(&config.oauth_token_url.to_string())
+        .form(&auth::OauthTokenRequest {
+            code: &oauth.code,
+            client_id: &config.oauth_id,
+            client_secret: &config.oauth_secret,
+            redirect_uri: redirect_uri.as_str(),
+            grant_type: "authorization_code",
+        })
+        .send()
+        .await
+        .map_err(Error::from)?;
 
-fn handle_json_error(error: axum::BoxError) -> (StatusCode, Json<JsonError>) {
-    if let Some(error) = error.downcast_ref::<Error>() {
-        if error.status_code() >= 500 && error.status_code() < 600 {
-            tracing::error!("server error: {}", error);
-        }
-        (error.status(), Json(error.json()))
-    } else {
-        tracing::error!("unhandled error: {}", error);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(JsonError {
-                code: 500,
-                message: "internal error".to_string(),
-            }),
-        )
-    }
+    let token_res = raw_res
+        .json::<auth::OauthTokenResponse>()
+        .await
+        .map_err(Error::from)?;
+
+    store.set(
+        "socialUser",
+        format!("google:{}", token_res.id_token.claims.sub),
+    );
+
+    let no_cache = axum::headers::CacheControl::new().with_no_store();
+
+    Ok((
+        store,
+        TypedHeader(no_cache),
+        Redirect::temporary(&config.base_url.to_string()),
+    ))
 }
 
 struct HtmlError(Error);
@@ -434,11 +483,7 @@ impl From<Error> for HtmlError {
 }
 
 impl IntoResponse for HtmlError {
-    type Body = axum::body::Full<axum::body::Bytes>;
-
-    type BodyError = <Self::Body as axum::body::HttpBody>::Error;
-
-    fn into_response(self) -> axum::http::Response<Self::Body> {
+    fn into_response(self) -> axum::response::Response {
         let status = self.0.status_code();
 
         let html = if status == 404 {
@@ -458,11 +503,7 @@ impl IntoResponse for HtmlError {
 }
 
 impl IntoResponse for JsonError {
-    type Body = axum::body::Full<axum::body::Bytes>;
-
-    type BodyError = <Self::Body as axum::body::HttpBody>::Error;
-
-    fn into_response(self) -> axum::http::Response<Self::Body> {
+    fn into_response(self) -> axum::response::Response {
         if self.code >= 500 && self.code < 600 {
             tracing::error!("server error: {}", self.message);
         }
@@ -475,21 +516,41 @@ impl IntoResponse for JsonError {
     }
 }
 
-struct Auth(pub super::server::users::User);
+#[async_trait]
+impl axum::extract::FromRequestParts<ServerState> for SessionStore {
+    type Rejection = axum::extract::rejection::ExtensionRejection;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &ServerState,
+    ) -> Result<Self, Self::Rejection> {
+        let Extension(store) = parts.extract::<Extension<SessionStore>>().await?;
+
+        Ok(store)
+    }
+}
+
+struct Auth<E>(pub super::server::users::User, std::marker::PhantomData<E>);
 
 #[async_trait]
-impl<B> axum::extract::FromRequest<B> for Auth
+impl<E> axum::extract::FromRequestParts<ServerState> for Auth<E>
 where
-    B: Send,
+    E: IntoResponse + From<Error>,
 {
-    type Rejection = HtmlError;
+    type Rejection = E;
 
-    async fn from_request(req: &mut RequestParts<B>) -> Result<Self, Self::Rejection> {
-        let db = req.extensions().and_then(|ext| ext.get::<Db>());
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &ServerState,
+    ) -> Result<Self, Self::Rejection> {
+        let db = parts
+            .extract_with_state::<State<Db>, ServerState>(state)
+            .await
+            .ok();
 
         let user = if let Some(db) = db {
             let db = db.clone().get().await?;
-            let store = req.extensions().and_then(|ext| ext.get::<Store>());
+            let store = parts.extract::<Extension<SessionStore>>().await.ok();
 
             if let Some(store) = store {
                 let id = store.get("socialUser");
@@ -508,43 +569,50 @@ where
 
         let user = user.ok_or(Error::Unauthorized)?;
 
-        Ok(Auth(user))
+        Ok(Auth(user, Default::default()))
+    }
+}
+
+impl From<Auth<HtmlError>> for HtmlAuth {
+    fn from(auth: Auth<HtmlError>) -> Self {
+        HtmlAuth(auth.0)
+    }
+}
+
+struct HtmlAuth(pub super::server::users::User);
+
+#[async_trait]
+impl axum::extract::FromRequestParts<ServerState> for HtmlAuth {
+    type Rejection = HtmlError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &ServerState,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Auth::<HtmlError>::from_request_parts(parts, state)
+            .await?
+            .into())
+    }
+}
+
+impl From<Auth<JsonError>> for ApiAuth {
+    fn from(auth: Auth<JsonError>) -> Self {
+        ApiAuth(auth.0)
     }
 }
 
 struct ApiAuth(pub super::server::users::User);
 
 #[async_trait]
-impl<B> axum::extract::FromRequest<B> for ApiAuth
-where
-    B: Send,
-{
+impl axum::extract::FromRequestParts<ServerState> for ApiAuth {
     type Rejection = JsonError;
 
-    async fn from_request(req: &mut RequestParts<B>) -> Result<Self, Self::Rejection> {
-        let db = req.extensions().and_then(|ext| ext.get::<Db>());
-
-        let user = if let Some(db) = db {
-            let db = db.clone().get().await?;
-            let store = req.extensions().and_then(|ext| ext.get::<Store>());
-
-            if let Some(store) = store {
-                let id = store.get("socialUser");
-                if let Some(social_id) = id {
-                    let mut client = UserClient::new(db);
-                    client.get_social_user(social_id).await.map(Some)?
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let user = user.ok_or(Error::Unauthorized)?;
-
-        Ok(ApiAuth(user))
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &ServerState,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Auth::<JsonError>::from_request_parts(parts, state)
+            .await?
+            .into())
     }
 }
