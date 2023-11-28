@@ -7,7 +7,7 @@ COPY . /build
 
 RUN cargo make
 
-FROM gcr.io/distroless/cc
+FROM gcr.io/distroless/cc-debian12
 
 WORKDIR /app
 COPY --from=builder /build/dist /app
