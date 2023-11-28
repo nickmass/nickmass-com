@@ -1,16 +1,16 @@
-use axum::body::HttpBody;
+use axum::body::Body;
 use axum::extract::{ConnectInfo, Extension, Path, Query, State};
 use axum::http::request::Parts;
-use axum::http::{header, HeaderValue, Request};
+use axum::http::{header, HeaderValue, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, IntoResponseParts, Redirect};
 use axum::routing::{get, get_service};
-use axum::{async_trait, Json, RequestPartsExt, Router, TypedHeader};
+use axum::{async_trait, Json, RequestPartsExt, Router};
 use axum_extra::extract::cookie::Cookie;
-use reqwest::StatusCode;
+use axum_extra::{headers, TypedHeader};
 use tower::ServiceBuilder;
 use tower_http::classify::ServerErrorsFailureClass;
-use tower_http::trace::{OnFailure, OnRequest, OnResponse};
+use tower_http::trace::{MakeSpan, OnFailure, OnRequest, OnResponse};
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -62,10 +62,10 @@ pub async fn run(config: Config) {
     );
 
     tracing::info!("serving assets from: {}", config.asset_dir);
-    let public_static = get_service(tower_http::services::ServeDir::new(
-        config.asset_dir.as_str(),
-    ))
-    .handle_error(static_file_error_handler);
+    let public_static = get_service(
+        tower_http::services::ServeDir::new(config.asset_dir.as_str())
+            .append_index_html_on_directories(false),
+    );
 
     let static_files = Router::new()
         .route("/css/*path", public_static.clone())
@@ -100,6 +100,7 @@ pub async fn run(config: Config) {
         .nest("/api", api)
         .layer(
             tower_http::trace::TraceLayer::new_for_http()
+                .make_span_with(MassTraceLog)
                 .on_request(MassTraceLog)
                 .on_response(MassTraceLog)
                 .on_failure(MassTraceLog),
@@ -114,33 +115,110 @@ pub async fn run(config: Config) {
         config.listen_port
     );
 
-    let shutdown = async {
-        use tokio::signal::unix::{signal, SignalKind};
-
-        let mut term = signal(SignalKind::terminate()).expect("unabled to listen to sigterm");
-        let mut int = signal(SignalKind::interrupt()).expect("unabled to listen to sigint");
-
-        tokio::select! {
-            _ = term.recv() => (),
-            _ = int.recv() => (),
-        }
-
-        tracing::info!("signal received shutting down")
-    };
-
-    axum::Server::bind(&(config.listen_ip, config.listen_port).into())
-        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(shutdown)
+    let listener = tokio::net::TcpListener::bind(&(config.listen_ip, config.listen_port))
         .await
-        .unwrap()
+        .unwrap();
+
+    let mut make_service = app.into_make_service_with_connect_info::<SocketAddr>();
+
+    let (close_tx, close_rx) = tokio::sync::watch::channel(());
+
+    loop {
+        let (socket, remote_addr) = tokio::select! {
+            _ = shutdown() => break,
+            conn = listener.accept() => conn.unwrap(),
+        };
+
+        use tower::Service;
+        let tower_service = make_service.call(remote_addr).await.unwrap();
+
+        let close_rx = close_rx.clone();
+
+        tokio::spawn(async move {
+            let socket = hyper_util::rt::TokioIo::new(socket);
+
+            let hyper_service =
+                hyper::service::service_fn(move |request: Request<hyper::body::Incoming>| {
+                    tower_service.clone().call(request)
+                });
+
+            let conn = hyper::server::conn::http1::Builder::new()
+                .serve_connection(socket, hyper_service)
+                .with_upgrades();
+
+            let mut conn = std::pin::pin!(conn);
+
+            loop {
+                tokio::select! {
+                    result = conn.as_mut() => {
+                        if let Err(err) = result {
+                            tracing::error!("failed to serve connection: {err:#}");
+                        }
+                        break;
+                    },
+                    _ = shutdown() => {
+                        conn.as_mut().graceful_shutdown();
+                    }
+                }
+            }
+
+            drop(close_rx);
+        });
+    }
+
+    drop(close_rx);
+    drop(listener);
+    tracing::info!(
+        "signal received shutting down, waiting for {} tasks to complete",
+        close_tx.receiver_count()
+    );
+    close_tx.closed().await;
+}
+
+async fn shutdown() {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut term = signal(SignalKind::terminate()).expect("unabled to listen to sigterm");
+    let mut int = signal(SignalKind::interrupt()).expect("unabled to listen to sigint");
+
+    tokio::select! {
+        _ = term.recv() => (),
+        _ = int.recv() => (),
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 struct MassTraceLog;
 
+impl<B> MakeSpan<B> for MassTraceLog {
+    fn make_span(&mut self, request: &Request<B>) -> tracing::Span {
+        let id = uuid::Uuid::new_v4();
+        if let Some(ConnectInfo(conn)) = request.extensions().get::<ConnectInfo<SocketAddr>>() {
+            tracing::span!(
+                tracing::Level::DEBUG,
+                "request",
+                method = %request.method(),
+                uri = %request.uri(),
+                remote_addr = %conn,
+                request_id = %id,
+                status_code = tracing::field::Empty
+            )
+        } else {
+            tracing::span!(
+                tracing::Level::DEBUG,
+                "request",
+                method = %request.method(),
+                uri = %request.uri(),
+                request_id = %id,
+                status_code = tracing::field::Empty,
+            )
+        }
+    }
+}
+
 impl<B> OnRequest<B> for MassTraceLog {
     fn on_request(&mut self, _request: &Request<B>, _span: &tracing::Span) {
-        tracing::info!("request started")
+        tracing::info!("request started");
     }
 }
 
@@ -152,7 +230,7 @@ impl<B> OnResponse<B> for MassTraceLog {
         span: &tracing::Span,
     ) {
         let status = response.status().as_u16().to_string();
-        span.record("http.status_code", &tracing::field::display(status));
+        span.record("status_code", &tracing::field::display(status));
 
         tracing::info!(
             latency_ms = latency.as_secs_f64() * 1000.0,
@@ -176,17 +254,14 @@ impl OnFailure<ServerErrorsFailureClass> for MassTraceLog {
     }
 }
 
-impl<B> SessionLayerExt<ServerState> for Router<ServerState, B>
-where
-    B: HttpBody + Send + 'static,
-{
+impl SessionLayerExt<ServerState> for Router<ServerState> {
     fn with_session_layer<E: From<Error> + IntoResponse + 'static>(
         self,
         state: ServerState,
     ) -> Self {
         self.layer(axum::middleware::from_fn_with_state(
             state,
-            add_session::<_, E>,
+            add_session::<E>,
         ))
     }
 }
@@ -195,11 +270,7 @@ trait SessionLayerExt<S> {
     fn with_session_layer<E: From<Error> + IntoResponse + 'static>(self, state: S) -> Self;
 }
 
-async fn static_file_error_handler(err: std::io::Error) -> impl IntoResponse {
-    tracing::error!("static file error: {}", err);
-    StatusCode::INTERNAL_SERVER_ERROR
-}
-
+#[derive(Clone)]
 struct SessionClear;
 
 impl IntoResponse for SessionClear {
@@ -238,13 +309,13 @@ impl IntoResponseParts for SessionStore {
     }
 }
 
-async fn add_session<B, E: From<Error> + IntoResponse>(
+async fn add_session<E: From<Error> + IntoResponse>(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     db: State<Db>,
     session: State<Arc<Session>>,
     jar: axum_extra::extract::CookieJar,
-    mut req: Request<B>,
-    next: Next<B>,
+    mut req: Request<Body>,
+    next: Next,
 ) -> Result<impl IntoResponse, E> {
     let sid = jar.get("sid").map(|c| c.value().to_string());
 
@@ -256,21 +327,19 @@ async fn add_session<B, E: From<Error> + IntoResponse>(
 
     let mut res = next.run(req).await;
     if let Some(_) = res.extensions_mut().remove::<SessionClear>() {
-        let cookie = Cookie::build("sid", "")
+        let cookie = Cookie::build(("sid", ""))
             .path("/")
             .http_only(true)
-            .same_site(axum_extra::extract::cookie::SameSite::Lax)
-            .finish();
+            .same_site(axum_extra::extract::cookie::SameSite::Lax);
         Ok((jar.remove(cookie), res).into_response())
     } else if let Some(store) = res.extensions_mut().remove::<SessionStore>() {
         let sid = store.sid();
         session.set_store(&mut connection, store).await;
-        let cookie = Cookie::build("sid", sid)
+        let cookie = Cookie::build(("sid", sid))
             .path("/")
             .http_only(true)
             .max_age(time::Duration::days(30))
-            .same_site(axum_extra::extract::cookie::SameSite::Lax)
-            .finish();
+            .same_site(axum_extra::extract::cookie::SameSite::Lax);
         Ok((jar.add(cookie), res).into_response())
     } else {
         Ok(res.into_response())
@@ -389,7 +458,7 @@ async fn api_fallback() -> JsonError {
 }
 
 async fn auth_logout(State(config): State<Arc<Config>>) -> impl IntoResponse {
-    let no_cache = axum::headers::CacheControl::new().with_no_store();
+    let no_cache = headers::CacheControl::new().with_no_store();
 
     (
         SessionClear,
@@ -424,7 +493,7 @@ async fn auth_google(
 
     let http_uri = auth_url.to_string();
 
-    let no_cache = axum::headers::CacheControl::new().with_no_store();
+    let no_cache = headers::CacheControl::new().with_no_store();
 
     Ok((store, TypedHeader(no_cache), Redirect::temporary(&http_uri)))
 }
@@ -465,7 +534,7 @@ async fn auth_google_return(
         format!("google:{}", token_res.id_token.claims.sub),
     );
 
-    let no_cache = axum::headers::CacheControl::new().with_no_store();
+    let no_cache = headers::CacheControl::new().with_no_store();
 
     Ok((
         store,
