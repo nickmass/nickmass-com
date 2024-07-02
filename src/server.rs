@@ -34,7 +34,7 @@ use posts::{Post, PostClient, PostPage};
 use sessions::{Session, SessionStore};
 use users::{User, UserClient};
 
-const CSP_DIRECTIVE: &'static str = "default-src 'none'; connect-src 'self'; font-src 'self'; frame-src https://www.youtube.com; img-src 'self' https://img.youtube.com; media-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+const CSP_DIRECTIVE: &'static str = "default-src 'none'; connect-src 'self'; font-src 'self'; frame-src https://www.youtube.com; img-src 'self' https://img.youtube.com; media-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self';";
 
 #[derive(axum::extract::FromRef, Clone)]
 struct ServerState {
