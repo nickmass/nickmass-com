@@ -1,6 +1,7 @@
 FROM docker.io/rust:latest AS builder
 
 RUN cargo install cargo-make
+RUN apt-get update && apt-get install -y cmake
 
 WORKDIR /build
 COPY . /build
