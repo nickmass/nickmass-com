@@ -2,7 +2,7 @@ use byteorder::{LittleEndian, WriteBytesExt};
 use gloo_events::EventListener;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::{Document, EventTarget, HtmlCanvasElement, MouseEvent, WebGlRenderingContext as GL};
+use web_sys::{Document, EventTarget, HtmlCanvasElement, MouseEvent, WebGl2RenderingContext as GL};
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

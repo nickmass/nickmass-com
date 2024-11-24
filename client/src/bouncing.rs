@@ -1,7 +1,7 @@
 use byteorder::{LittleEndian, WriteBytesExt};
 use lyon::tessellation::*;
 use rand::distributions::{Distribution, Standard};
-use web_sys::{EventTarget, WebGlRenderingContext as GL};
+use web_sys::{EventTarget, WebGl2RenderingContext as GL};
 
 use crate::gl::*;
 use crate::header::*;
@@ -531,7 +531,7 @@ impl AsGlVertex for Vertex {
         ("a_alpha", GlValueType::Float),
     ];
     const POLY_TYPE: u32 = GL::TRIANGLES;
-    const SIZE: usize = 20;
+    const SIZE: usize = 24;
     fn write(&self, mut buf: impl std::io::Write) {
         let _ = buf.write_f32::<LittleEndian>(self.position.x);
         let _ = buf.write_f32::<LittleEndian>(self.position.y);
@@ -550,7 +550,7 @@ impl AsGlVertex for BallInstance {
     const ATTRIBUTES: &'static [(&'static str, GlValueType)] =
         &[("a_model_matrix", GlValueType::Mat3)];
     const POLY_TYPE: u32 = GL::TRIANGLE_FAN;
-    const SIZE: usize = 36;
+    const SIZE: usize = 4 * 3 * 3;
     fn write(&self, mut buf: impl std::io::Write) {
         for f in &self.matrix {
             let _ = buf.write_f32::<LittleEndian>(*f);

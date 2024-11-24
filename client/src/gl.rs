@@ -1,8 +1,9 @@
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{
-    HtmlCanvasElement, WebGlBuffer, WebGlFramebuffer, WebGlProgram, WebGlRenderingContext as GL,
-    WebGlRenderingContext, WebGlShader, WebGlTexture, WebGlUniformLocation,
+    HtmlCanvasElement, WebGl2RenderingContext as GL, WebGl2RenderingContext, WebGlBuffer,
+    WebGlFramebuffer, WebGlProgram, WebGlShader, WebGlTexture, WebGlUniformLocation,
+    WebGlVertexArrayObject,
 };
 
 use std::any::{Any, TypeId};
@@ -10,7 +11,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 pub struct GlContext<C = HtmlCanvasElement> {
-    gl: WebGlRenderingContext,
+    gl: WebGl2RenderingContext,
     canvas: C,
     ext_map: RefCell<HashMap<TypeId, Option<Box<dyn Any>>>>,
 }
@@ -18,16 +19,16 @@ pub struct GlContext<C = HtmlCanvasElement> {
 impl GlContext {
     pub fn new(canvas: HtmlCanvasElement) -> Self {
         let gl = canvas
-            .get_context("webgl")
+            .get_context("webgl2")
             .unwrap_or(None)
-            .and_then(|e| e.dyn_into::<WebGlRenderingContext>().ok())
+            .and_then(|e| e.dyn_into::<WebGl2RenderingContext>().ok())
             .unwrap();
         GlContext::with_gl(canvas, gl)
     }
 }
 
 impl<C> GlContext<C> {
-    pub fn with_gl(canvas: C, gl: WebGlRenderingContext) -> Self {
+    pub fn with_gl(canvas: C, gl: WebGl2RenderingContext) -> Self {
         GlContext {
             gl,
             canvas,
@@ -55,7 +56,7 @@ impl<C> GlContext<C> {
 }
 
 impl<C> std::ops::Deref for GlContext<C> {
-    type Target = WebGlRenderingContext;
+    type Target = WebGl2RenderingContext;
 
     fn deref(&self) -> &Self::Target {
         &self.gl
@@ -66,21 +67,12 @@ pub trait GlExtension: Any + Clone + JsCast {
     const EXT_NAME: &'static str;
 }
 
-impl GlExtension for OesVertexArrayObject {
-    const EXT_NAME: &'static str = "OES_vertex_array_object";
-}
-
-impl GlExtension for AngleInstancedArrays {
-    const EXT_NAME: &'static str = "ANGLE_instanced_arrays";
-}
-
 pub struct GlProgram<'ctx> {
     gl: &'ctx GlContext,
     program: WebGlProgram,
     vertex_shader: WebGlShader,
     fragment_shader: WebGlShader,
     texture_unit: Cell<u32>,
-    vao_ext: OesVertexArrayObject,
     vao_map: HashMap<u64, WebGlVertexArrayObject>,
     uniform_map: HashMap<&'static str, Option<WebGlUniformLocation>>,
 }
@@ -132,15 +124,12 @@ impl<'ctx> GlProgram<'ctx> {
             }
         }
 
-        let vao_ext = gl.load_extension().expect("Oes VAO extension");
-
         GlProgram {
             gl,
             program: prog,
             texture_unit: Cell::new(0),
             vertex_shader: shader_vert,
             fragment_shader: shader_frag,
-            vao_ext,
             vao_map: HashMap::new(),
             uniform_map: HashMap::new(),
         }
@@ -158,26 +147,20 @@ impl<'ctx> GlProgram<'ctx> {
 
         let key = model.id;
         if let Some(vao) = self.vao_map.get(&key) {
-            self.vao_ext
-                .bind_vertex_array_oes(Some(vao))
-                .expect("Bind vao");
+            self.gl.bind_vertex_array(Some(vao));
         } else {
-            let vao = self.vao_ext.create_vertex_array_oes().expect("Create vao");
+            let vao = self.gl.create_vertex_array().expect("Create vao");
             self.vao_map.insert(key, vao);
             let vao = self.vao_map.get(&key).unwrap();
 
-            self.vao_ext
-                .bind_vertex_array_oes(Some(vao))
-                .expect("Bind vao");
+            self.gl.bind_vertex_array(Some(vao));
             model.fill_vao(&self);
         }
 
         self.bind_uniforms(uniforms);
         model.draw(indices);
 
-        self.vao_ext
-            .bind_vertex_array_oes(None)
-            .expect("Unbind vao");
+        self.gl.bind_vertex_array(None);
         self.reset_texture_unit();
     }
 
@@ -192,28 +175,13 @@ impl<'ctx> GlProgram<'ctx> {
     {
         self.gl.use_program(Some(&self.program));
 
-        let key = model.id;
-        if let Some(vao) = self.vao_map.get(&key) {
-            self.vao_ext
-                .bind_vertex_array_oes(Some(vao))
-                .expect("Bind vao");
-        } else {
-            let vao = self.vao_ext.create_vertex_array_oes().expect("Create vao");
-            self.vao_map.insert(key, vao);
-            let vao = self.vao_map.get(&key).unwrap();
-
-            self.vao_ext
-                .bind_vertex_array_oes(Some(vao))
-                .expect("Bind vao");
-            model.fill_vao_instanced::<I>(&self);
-        }
-
+        // Vao stopped working correctly for instanced models after a firefox update,
+        // was working for many years prior
+        model.fill_vao_instanced::<I>(&self);
         self.bind_uniforms(uniforms);
         model.draw_instanced(instanced_data);
 
-        self.vao_ext
-            .bind_vertex_array_oes(None)
-            .expect("Unbind vao");
+        self.gl.bind_vertex_array(None);
         self.reset_texture_unit();
     }
 
@@ -246,7 +214,7 @@ impl<'ctx> GlProgram<'ctx> {
 impl<'ctx> Drop for GlProgram<'ctx> {
     fn drop(&mut self) {
         for (_k, v) in self.vao_map.drain() {
-            let _ = self.vao_ext.delete_vertex_array_oes(v);
+            let _ = self.gl.delete_vertex_array(Some(&v));
         }
 
         self.gl.detach_shader(&self.program, &self.vertex_shader);
@@ -347,7 +315,6 @@ pub struct GlModel<'ctx, V: AsGlVertex> {
     instanced_buffer: WebGlBuffer,
     poly_type: u32,
     poly_count: i32,
-    instanced_ext: AngleInstancedArrays,
     _marker: std::marker::PhantomData<V>,
 }
 
@@ -368,8 +335,6 @@ impl<'ctx, V: AsGlVertex> GlModel<'ctx, V> {
 
         let instanced_buffer = gl.create_buffer().expect("Gl Instance Buffer");
 
-        let instanced_ext = gl.load_extension().expect("Angle instaned arrays");
-
         GlModel {
             gl,
             id: rand::random(),
@@ -378,7 +343,6 @@ impl<'ctx, V: AsGlVertex> GlModel<'ctx, V> {
             poly_type,
             poly_count,
             instanced_buffer,
-            instanced_ext,
             _marker: Default::default(),
         }
     }
@@ -409,18 +373,19 @@ impl<'ctx, V: AsGlVertex> GlModel<'ctx, V> {
     fn fill_vao(&self, program: &GlProgram) {
         self.gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.buffer));
         self.enable_attrs::<V>(program, None);
+        self.gl.bind_buffer(GL::ARRAY_BUFFER, None);
     }
 
     fn fill_vao_instanced<I: AsGlVertex>(&self, program: &GlProgram) {
         self.gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.buffer));
-        self.enable_attrs::<V>(program, Some(0));
+        self.enable_attrs::<V>(program, None);
         self.gl
             .bind_buffer(GL::ARRAY_BUFFER, Some(&self.instanced_buffer));
         self.enable_attrs::<I>(program, Some(1));
     }
 
     fn enable_attrs<I: AsGlVertex>(&self, program: &GlProgram, divisor: Option<u32>) {
-        let stride = I::ATTRIBUTES.iter().map(|a| a.1.size()).sum();
+        let stride = I::SIZE as i32;
         let mut offset = 0;
         for (name, vtype) in I::ATTRIBUTES {
             let location = self.gl.get_attrib_location(&program.program, name);
@@ -428,13 +393,10 @@ impl<'ctx, V: AsGlVertex> GlModel<'ctx, V> {
                 continue;
             }
             let location = location as u32;
-            if let Some(divisor) = divisor {
-                for i in 0..vtype.elements() {
-                    self.instanced_ext
-                        .vertex_attrib_divisor_angle(location + i, divisor);
-                }
-            }
             vtype.layout(&self.gl, location, stride, offset);
+            if let Some(divisor) = divisor {
+                vtype.divisor(&self.gl, location, divisor);
+            }
             vtype.enable(&self.gl, location);
             offset += vtype.size();
         }
@@ -471,9 +433,8 @@ impl<'ctx, V: AsGlVertex> GlModel<'ctx, V> {
         self.gl
             .buffer_data_with_u8_array(GL::ARRAY_BUFFER, data.as_slice(), GL::DYNAMIC_DRAW);
 
-        self.instanced_ext
-            .draw_arrays_instanced_angle(self.poly_type, 0, self.poly_count, count as i32)
-            .expect("Instanced Draw");
+        self.gl
+            .draw_arrays_instanced(self.poly_type, 0, self.poly_count, count as i32);
     }
 }
 
@@ -557,14 +518,6 @@ impl GlValueType {
         }
     }
 
-    fn elements(&self) -> u32 {
-        match self {
-            GlValueType::Mat3 => 3,
-            GlValueType::Mat4 => 4,
-            _ => 1,
-        }
-    }
-
     fn enable(&self, gl: &GL, location: u32) {
         match self {
             GlValueType::Mat3 => {
@@ -579,6 +532,23 @@ impl GlValueType {
                 gl.enable_vertex_attrib_array(location + 3);
             }
             _ => gl.enable_vertex_attrib_array(location),
+        }
+    }
+
+    fn divisor(&self, gl: &GL, location: u32, divisor: u32) {
+        match self {
+            GlValueType::Mat3 => {
+                gl.vertex_attrib_divisor(location, divisor);
+                gl.vertex_attrib_divisor(location + 1, divisor);
+                gl.vertex_attrib_divisor(location + 2, divisor);
+            }
+            GlValueType::Mat4 => {
+                gl.vertex_attrib_divisor(location, divisor);
+                gl.vertex_attrib_divisor(location + 1, divisor);
+                gl.vertex_attrib_divisor(location + 2, divisor);
+                gl.vertex_attrib_divisor(location + 3, divisor);
+            }
+            _ => gl.vertex_attrib_divisor(location, divisor),
         }
     }
 
@@ -752,70 +722,4 @@ impl<'ctx> Drop for GlFrameBuffer<'ctx> {
     fn drop(&mut self) {
         self.gl.delete_framebuffer(Some(&self.frame_buffer));
     }
-}
-
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_name = ANGLEInstancedArrays)]
-    #[derive(Clone)]
-    type AngleInstancedArrays;
-
-    #[wasm_bindgen(method, getter, js_name = VERTEX_ATTRIB_ARRAY_DIVISOR_ANGLE)]
-    fn vertex_attrib_array_divisor_angle(this: &AngleInstancedArrays) -> i32;
-
-    #[wasm_bindgen(method, catch, js_name = drawArraysInstancedANGLE)]
-    fn draw_arrays_instanced_angle(
-        this: &AngleInstancedArrays,
-        mode: u32,
-        first: i32,
-        count: i32,
-        primcount: i32,
-    ) -> Result<(), JsValue>;
-
-    #[wasm_bindgen(method, catch, js_name = drawElementsInstancedANGLE)]
-    fn draw_elements_instanced_angle(
-        this: &AngleInstancedArrays,
-        mode: u32,
-        count: i32,
-        type_: u32,
-        offset: i32,
-        primcount: i32,
-    ) -> Result<(), JsValue>;
-
-    #[wasm_bindgen(method, js_name = vertexAttribDivisorANGLE)]
-    fn vertex_attrib_divisor_angle(this: &AngleInstancedArrays, index: u32, divisor: u32);
-
-    #[wasm_bindgen(js_name = OESVertexArrayObject)]
-    #[derive(Clone)]
-    type OesVertexArrayObject;
-
-    #[wasm_bindgen(js_name = WebGLVertexArrayObject)]
-    type WebGlVertexArrayObject;
-
-    #[wasm_bindgen(method, getter, js_name = VERTEX_ATTRIB_ARRAY_BINDING_OES)]
-    fn vertex_attrib_array_binding_oes(this: &OesVertexArrayObject) -> i32;
-
-    #[wasm_bindgen(method, catch, js_name = createVertexArrayOES)]
-    fn create_vertex_array_oes(
-        this: &OesVertexArrayObject,
-    ) -> Result<WebGlVertexArrayObject, JsValue>;
-
-    #[wasm_bindgen(method, catch, js_name = deleteVertexArrayOES)]
-    fn delete_vertex_array_oes(
-        this: &OesVertexArrayObject,
-        vao: WebGlVertexArrayObject,
-    ) -> Result<(), JsValue>;
-
-    #[wasm_bindgen(method, catch, js_name = bindVertexArrayOES)]
-    fn bind_vertex_array_oes(
-        this: &OesVertexArrayObject,
-        vao: Option<&WebGlVertexArrayObject>,
-    ) -> Result<(), JsValue>;
-
-    #[wasm_bindgen(method, catch, js_name = isVertexArrayOES)]
-    fn is_vertex_array_oes(
-        this: &OesVertexArrayObject,
-        vao: &WebGlVertexArrayObject,
-    ) -> Result<bool, JsValue>;
-
 }
